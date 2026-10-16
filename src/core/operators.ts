@@ -5,7 +5,7 @@
  */
 import { FieldType } from './field-types'
 
-/** 字段操作符名（与 Java xu9t 逐一同名同序） */
+/** 字段操作符名 */
 export type Operator =
   | 'EQUALS'
   | 'NOT_EQUAL'

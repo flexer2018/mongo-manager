@@ -58,6 +58,8 @@ export function toShellLiteral(value: Value): string {
   if (value === null || value === undefined) return 'null'
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (value instanceof Int32) return String(value.valueOf())
+  // Timestamp 继承自 Long，必须先于 Long 判定，否则退化为裸 64 位数字（类型丢失）
+  if (value instanceof Timestamp) return `Timestamp(${value.t}, ${value.i})`
   if (value instanceof Long) return value.toString()
   if (typeof value === 'number') {
     if (Number.isNaN(value)) return 'NaN'
@@ -73,7 +75,6 @@ export function toShellLiteral(value: Value): string {
     return `/${value.pattern}/${options}`
   }
   if (value instanceof Decimal128) return `NumberDecimal(${jsonQuote(value.toString())})`
-  if (value instanceof Timestamp) return `Timestamp(t: ${value.t}, i: ${value.i})`
   if (value instanceof Binary) {
     if (value.sub_type === 4) return `UUID(${jsonQuote(uuidString(value.buffer))})`
     const hex = [...value.buffer].map((b) => b.toString(16).padStart(2, '0')).join('')

@@ -26,9 +26,11 @@ function FilterEditor({
   const handleMount = useCallback(
     (instance: MonacoEditor.IStandaloneCodeEditor) => {
       editorRef.current = instance
-      // Ctrl+Enter → 全部执行
+      // Ctrl+Enter → 全部执行（新查询回到第一页）
       instance.addCommand(KeyMod.CtrlCmd | KeyCode.Enter, () => {
-        useAppStore.getState().runTab(useAppStore.getState().activeTabId ?? '')
+        useAppStore
+          .getState()
+          .runTab(useAppStore.getState().activeTabId ?? '', { resetSkip: true })
       })
     },
     [editorRef]
@@ -136,7 +138,7 @@ export function QueryBar(): JSX.Element | null {
 
   const runMode = (mode: RunMode): void => {
     if (activeTab.queryMode !== 'sql') {
-      void runTab(activeTab.id)
+      void runTab(activeTab.id, { resetSkip: true })
       return
     }
     const text = extractText(mode)

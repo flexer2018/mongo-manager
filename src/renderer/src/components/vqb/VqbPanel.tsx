@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { EJSON, ObjectId } from 'bson'
 import type { JSX } from 'react'
-import { Plus, Trash2, CornerDownRight, Play } from 'lucide-react'
+import {
+  Calendar,
+  ChevronDown,
+  ChevronUp,
+  GripVertical,
+  Plus,
+  Trash2,
+  CornerDownRight,
+  Play
+} from 'lucide-react'
 import {
   ARRAY_ELEMENT_PLACEHOLDER,
   FieldRule,
@@ -14,12 +24,31 @@ import {
   createQueryGroup,
   OPERATOR_MEMBERS,
   operatorDescription,
-  applicableOperator
+  applicableOperator,
+  isRangeOperator,
+  parseShellLiteral
 } from '@core'
 import { useAppStore } from '../../store/app-store'
 
 const GROUP_OPS: GroupOp[] = ['AND', 'OR', 'NOR']
 const VALUE_PLACEHOLDER = 'null'
+
+/** 结果表格 → VQB 字段栏拖放的 MIME 类型（载荷：{field, value: EJSON 文本|null}） */
+export const VQB_FIELD_MIME = 'application/x-vqb-field'
+
+/**
+ * 同一父组内的子节点排序：把 from 位置的节点移到 to 位置（to 语义为目标行
+ * 当前位置）。from < to 时删除后目标左移一位，插入 to-1 正好落到原目标行处。
+ */
+function moveChild(parent: QueryGroup, from: number, to: number): void {
+  const count = parent.children.length
+  if (from === to || from < 0 || to < 0 || from >= count || to >= count) return
+  const [node] = parent.children.splice(from, 1)
+  parent.children.splice(from < to ? to - 1 : to, 0, node)
+}
+
+/** HTML5 DnD 上下文：拖动源（父组 + 位置）；只允许同一父组内拖动排序 */
+let dragCtx: { parent: QueryGroup; index: number } | null = null
 
 function operatorChoices(fieldType: string | null): Operator[] {
   return OPERATOR_MEMBERS.filter((op) => applicableOperator(op, fieldType as never))
@@ -36,15 +65,19 @@ const FIELD_LIST_MAX = 200
 function FieldCombo({
   value,
   options,
-  onChange
+  onChange,
+  onDropField
 }: {
   value: string
   options: string[]
   onChange(field: string): void
+  /** 从结果表格拖入字段：设置字段名并填充值 */
+  onDropField?(field: string, value: Value | null): void
 }): JSX.Element {
   const [query, setQuery] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const [rect, setRect] = useState<{ top: number; left: number; width: number } | null>(null)
+  const [dropHover, setDropHover] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const filter = (query ?? '').toLowerCase()
   const list = useMemo(
@@ -82,8 +115,33 @@ function FieldCombo({
         }}
         onFocus={openWithRect}
         onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes(VQB_FIELD_MIME)) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+          setDropHover(true)
+        }}
+        onDragLeave={() => setDropHover(false)}
+        onDrop={(event) => {
+          setDropHover(false)
+          const payload = event.dataTransfer.getData(VQB_FIELD_MIME)
+          if (payload === '') return
+          event.preventDefault()
+          event.stopPropagation()
+          try {
+            const parsed = JSON.parse(payload) as { field: string; value: string | null }
+            const dropped = parsed.value !== null ? (EJSON.parse(parsed.value) as Value) : null
+            setQuery(null)
+            setOpen(false)
+            onDropField?.(parsed.field, dropped)
+          } catch {
+            /* 非法载荷忽略 */
+          }
+        }}
         placeholder="（字段，输入过滤）"
-        className="mono h-6 w-full rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
+        className={`mono h-6 w-full rounded border bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim ${
+          dropHover ? 'border-accent bg-hover' : 'border-line'
+        }`}
       />
       {open &&
         rect !== null &&
@@ -160,6 +218,12 @@ function RuleRow({
     commit()
   }
 
+  const index = parent.children.indexOf(rule)
+  const move = (delta: -1 | 1): void => {
+    moveChild(parent, index, index + delta)
+    commit()
+  }
+
   const fieldType = useMemo(() => {
     const tab = useAppStore.getState().tabs.find((item) => item.id === useAppStore.getState().activeTabId)
     const schema = tab?.schema ?? null
@@ -168,13 +232,38 @@ function RuleRow({
   const choices = operatorChoices(fieldType)
   const isCustom = rule.operator === 'CUSTOM'
   const isTextual = rule.operator === 'TEXT_INDEX_SEARCH'
+  const isRange = isRangeOperator(rule.operator)
+
+  // 时间选择器：日期字段 / 已是 Date 值时自动出现，也可手动开关（两个值共用开关）
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const showPicker =
+    pickerOpen ||
+    rule.value instanceof Date ||
+    rule.secondValue instanceof Date ||
+    fieldType === 'ISODATE'
 
   return (
     <div className="flex items-center gap-1.5 py-0.5">
+      <span
+        draggable
+        onDragStart={(event) => {
+          dragCtx = { parent, index }
+          event.dataTransfer.effectAllowed = 'move'
+          event.dataTransfer.setData('text/plain', String(index))
+        }}
+        onDragEnd={() => {
+          dragCtx = null
+        }}
+        title="拖动调整顺序"
+        className="shrink-0 cursor-grab text-text-faint transition-colors duration-fast hover:text-text-secondary active:cursor-grabbing"
+      >
+        <GripVertical size={11} />
+      </span>
       <FieldCombo
         value={rule.field}
         options={schemaNames}
         onChange={(field) => update({ field })}
+        onDropField={(field, dropped) => update({ field, value: dropped ?? null })}
       />
 
       <select
@@ -197,6 +286,55 @@ function RuleRow({
           className="mono h-6 min-w-0 flex-1 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
         />
       )}
+      {!isTextual && showPicker && (
+        <input
+          type="datetime-local"
+          step={0.001}
+          value={dateToPickerText(rule.value)}
+          onChange={(event) => {
+            const date = pickerTextToDate(event.target.value)
+            if (date !== null) update({ value: date })
+          }}
+          title="选择时间（写入 ISODate）"
+          className="h-6 w-28 shrink-0 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none focus:border-accent-dim"
+        />
+      )}
+      {isRange && !isTextual && (
+        <span className="shrink-0 text-[11px] text-text-faint">~</span>
+      )}
+      {isRange && !isTextual && (
+        <input
+          value={valueToText(rule.secondValue)}
+          onChange={(event) => update({ secondValue: textToValue(event.target.value) })}
+          placeholder={VALUE_PLACEHOLDER}
+          className="mono h-6 min-w-0 flex-1 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
+        />
+      )}
+      {isRange && !isTextual && showPicker && (
+        <input
+          type="datetime-local"
+          step={0.001}
+          value={dateToPickerText(rule.secondValue)}
+          onChange={(event) => {
+            const date = pickerTextToDate(event.target.value)
+            if (date !== null) update({ secondValue: date })
+          }}
+          title="选择上界时间（写入 ISODate）"
+          className="h-6 w-28 shrink-0 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none focus:border-accent-dim"
+        />
+      )}
+      {!isTextual && !fieldType && (
+        <button
+          type="button"
+          onClick={() => setPickerOpen(!pickerOpen)}
+          title={pickerOpen ? '收起时间选择器' : '展开时间选择器'}
+          className={`shrink-0 cursor-pointer rounded p-0.5 transition-colors duration-fast ${
+            pickerOpen ? 'text-accent' : 'text-text-faint hover:text-text-primary'
+          }`}
+        >
+          <Calendar size={12} />
+        </button>
+      )}
       {isCustom && (
         <input
           value={rule.customText}
@@ -213,8 +351,26 @@ function RuleRow({
           onChange={(event) => update({ include: event.target.checked })}
           className="size-3 accent-[#00d26a]"
         />
-        Include
+        
       </label>
+      <button
+        type="button"
+        onClick={() => move(-1)}
+        disabled={index <= 0}
+        title="上移"
+        className="shrink-0 cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-accent disabled:cursor-default disabled:opacity-30"
+      >
+        <ChevronUp size={11} />
+      </button>
+      <button
+        type="button"
+        onClick={() => move(1)}
+        disabled={index < 0 || index >= parent.children.length - 1}
+        title="下移"
+        className="shrink-0 cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-accent disabled:cursor-default disabled:opacity-30"
+      >
+        <ChevronDown size={11} />
+      </button>
       <button
         type="button"
         onClick={remove}
@@ -228,13 +384,53 @@ function RuleRow({
 
 function valueToText(value: unknown): string {
   if (value === null || value === undefined) return ''
+  if (value instanceof Date) return `ISODate("${value.toISOString()}")`
+  if (value instanceof ObjectId) return `ObjectId("${value.toString()}")`
   if (Array.isArray(value)) return JSON.stringify(value)
   return String(value)
 }
 
-/** 白名单值解析：数字/布尔/null/JSON 数组；其余按字符串 */
+/** Date → datetime-local 输入值（本地时区，精确到毫秒）；非法值返回空串 */
+function dateToPickerText(value: unknown): string {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) return ''
+  const pad = (n: number, width = 2): string => String(n).padStart(width, '0')
+  return (
+    `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}` +
+    `T${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}` +
+    `.${pad(value.getMilliseconds(), 3)}`
+  )
+}
+
+/** datetime-local 输入值 → 本地时区 Date；格式非法返回 null */
+function pickerTextToDate(text: string): Date | null {
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/)
+  if (m === null) return null
+  const ms = m[7] !== undefined ? Number(m[7].padEnd(3, '0')) : 0
+  return new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    m[6] !== undefined ? Number(m[6]) : 0,
+    ms
+  )
+}
+
+/** shell 构造器前缀（含合法单参/多参形式），命中才走受限 shell 解析 */
+const SHELL_CONSTRUCTOR_RE =
+  /^(?:ISODate|Date|ObjectId|NumberLong|NumberInt|NumberDecimal|UUID|BinData|Timestamp|MinKey|MaxKey)\s*\(\s*['"0-9tfn+\-.[]/i
+
+/** 白名单值解析：数字/布尔/null/JSON 数组/shell 构造器（ISODate/ObjectId…）；其余按字符串 */
 function textToValue(text: string): Value {
   const trimmed = text.trim()
+  if (SHELL_CONSTRUCTOR_RE.test(trimmed)) {
+    try {
+      return parseShellLiteral(trimmed) as Value
+    } catch {
+      /* fallthrough：非法构造器参数按字符串处理 */
+    }
+  }
   if (trimmed === '' || trimmed === 'null') return null
   if (trimmed === 'true') return true
   if (trimmed === 'false') return false
@@ -263,6 +459,8 @@ function GroupBlock({
 }): JSX.Element {
   const setVqbTree = useAppStore((s) => s.setVqbTree)
   const isElemMatch = group.op === 'ELEM_MATCH' || group.op === 'NOT_ELEM_MATCH'
+  // 拖放排序：记录悬停目标行用于高亮（仅响应同一父组内发起的拖动）
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
 
   const mutate = (): void => {
     const state = useAppStore.getState()
@@ -291,12 +489,36 @@ function GroupBlock({
     mutate()
   }
 
+  const index = parent !== null ? parent.children.indexOf(group) : -1
+  const move = (delta: -1 | 1): void => {
+    if (parent === null) return
+    moveChild(parent, index, index + delta)
+    mutate()
+  }
+
   return (
     <div
       className={`rounded border border-line bg-base/60 ${depth === 0 ? '' : 'ml-4 mt-0.5'}`}
       style={depth === 0 ? undefined : { borderLeft: '2px solid #34455c' }}
     >
       <div className="flex items-center gap-1.5 px-1.5 py-1">
+        {parent !== null && (
+          <span
+            draggable
+            onDragStart={(event) => {
+              dragCtx = { parent, index }
+              event.dataTransfer.effectAllowed = 'move'
+              event.dataTransfer.setData('text/plain', String(index))
+            }}
+            onDragEnd={() => {
+              dragCtx = null
+            }}
+            title="拖动调整顺序"
+            className="cursor-grab text-text-faint transition-colors duration-fast hover:text-text-secondary active:cursor-grabbing"
+          >
+            <GripVertical size={11} />
+          </span>
+        )}
         {isElemMatch ? (
           <input
             value={group.field}
@@ -327,35 +549,79 @@ function GroupBlock({
         </select>
         <div className="flex-1" />
         {parent !== null && (
-          <button
-            type="button"
-            onClick={remove}
-            className="cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-danger"
-          >
-            <Trash2 size={12} />
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => move(-1)}
+              disabled={index <= 0}
+              title="上移"
+              className="cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-accent disabled:cursor-default disabled:opacity-30"
+            >
+              <ChevronUp size={11} />
+            </button>
+            <button
+              type="button"
+              onClick={() => move(1)}
+              disabled={index < 0 || index >= parent.children.length - 1}
+              title="下移"
+              className="cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-accent disabled:cursor-default disabled:opacity-30"
+            >
+              <ChevronDown size={11} />
+            </button>
+            <button
+              type="button"
+              onClick={remove}
+              className="cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-danger"
+            >
+              <Trash2 size={12} />
+            </button>
+          </>
         )}
       </div>
 
       <div className="px-1.5 pb-1.5">
-        {group.children.map((child) =>
-          child.kind === 'rule' ? (
-            <RuleRow
-              key={child.identityKey()}
-              rule={child as unknown as FieldRule}
-              parent={group}
-              schemaNames={schemaNames}
-            />
-          ) : (
-            <GroupBlock
-              key={child.identityKey()}
-              group={child as unknown as QueryGroup}
-              parent={group}
-              depth={depth + 1}
-              schemaNames={schemaNames}
-            />
-          )
-        )}
+        {group.children.map((child, index) => (
+          <div
+            key={child.identityKey()}
+            onDragOver={(event) => {
+              if (dragCtx === null || dragCtx.parent !== group) return
+              event.preventDefault()
+              event.dataTransfer.dropEffect = 'move'
+              setDropIndex(index)
+            }}
+            onDrop={(event) => {
+              if (dragCtx === null || dragCtx.parent !== group) return
+              event.preventDefault()
+              moveChild(group, dragCtx.index, index)
+              dragCtx = null
+              setDropIndex(null)
+              mutate()
+            }}
+            onDragEnd={() => {
+              dragCtx = null
+              setDropIndex(null)
+            }}
+            onDragLeave={() => {
+              setDropIndex(null)
+            }}
+            className={dropIndex === index ? 'rounded bg-active/40' : undefined}
+          >
+            {child.kind === 'rule' ? (
+              <RuleRow
+                rule={child as unknown as FieldRule}
+                parent={group}
+                schemaNames={schemaNames}
+              />
+            ) : (
+              <GroupBlock
+                group={child as unknown as QueryGroup}
+                parent={group}
+                depth={depth + 1}
+                schemaNames={schemaNames}
+              />
+            )}
+          </div>
+        ))}
         <div className="mt-1 flex items-center gap-2">
           <button
             type="button"
@@ -438,7 +704,7 @@ export function VqbPanel(): JSX.Element | null {
           onClick={() => {
             if (activeTab === null) return
             exportVqbToFilter()
-            void useAppStore.getState().runTab(activeTab.id)
+            void useAppStore.getState().runTab(activeTab.id, { resetSkip: true })
           }}
           className="flex h-6 cursor-pointer items-center gap-1 rounded bg-accent px-3 text-[10px] font-semibold text-[rgb(var(--c-on-accent))] transition-colors duration-fast hover:bg-accent-bright disabled:cursor-not-allowed disabled:opacity-50"
         >

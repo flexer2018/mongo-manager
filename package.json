@@ -1,6 +1,6 @@
 {
   "name": "mongo-manager",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Free open-source MongoDB desktop manager with visual query builder, multi-language driver code generation and SQL query",
   "main": "./out/main/index.js",
   "author": "rea-work",

@@ -259,6 +259,11 @@ class LiteralParser {
       )
     }
     this.expect('(')
+    // 兼容历史导出格式 Timestamp(t: <n>, i: <n>)；不是该形态则走通用位置参数解析
+    if (name === 'Timestamp') {
+      const labeled = this.tryParseLabeledTimestamp()
+      if (labeled !== null) return labeled
+    }
     const args: Value[] = []
     const head = this.peek()
     if (head !== null && head.text === ')') {
@@ -281,6 +286,31 @@ class LiteralParser {
     }
   }
 
+  /**
+   * 尝试解析 Timestamp(t: <n>, i: <n>) 带标签参数形态。
+   * 失败（首记号不是 t 或中途格式不符）时回退游标并返回 null，交还给通用解析。
+   */
+  private tryParseLabeledTimestamp(): Value | null {
+    const start = this.pos
+    const head = this.peek()
+    if (head === null || head.text !== 't') return null
+    try {
+      this.next()
+      this.expect(':')
+      const t = toInt(this.parseValue())
+      this.expect(',')
+      const iKey = this.next()
+      if (iKey.text !== 'i') throw new ShellLiteralError('期望标签 i')
+      this.expect(':')
+      const i = toInt(this.parseValue())
+      this.expect(')')
+      return new Timestamp({ t, i })
+    } catch {
+      this.pos = start
+      return null
+    }
+  }
+
   private parseContainer(): Value {
     const token = this.next()
     if (token.text === '[') {
@@ -296,6 +326,12 @@ class LiteralParser {
         if (nxt.text === ']') return items
         if (nxt.text !== ',') {
           throw new ShellLiteralError(`数组里期望 ',' 或 ']'，得到 ${JSON.stringify(nxt.text)}`)
+        }
+        // 容忍尾逗号：[1, 2, ]（mongosh 允许，JSON.parse 不允许）
+        const after = this.peek()
+        if (after !== null && after.text === ']') {
+          this.next()
+          return items
         }
       }
     }
@@ -317,6 +353,12 @@ class LiteralParser {
       if (nxt.text === '}') return result
       if (nxt.text !== ',') {
         throw new ShellLiteralError(`对象里期望 ',' 或 '}'，得到 ${JSON.stringify(nxt.text)}`)
+      }
+      // 容忍尾逗号：{ a: 1, }（mongosh 允许，JSON.parse 不允许）
+      const after = this.peek()
+      if (after !== null && after.text === '}') {
+        this.next()
+        return result
       }
     }
   }
@@ -364,8 +406,32 @@ function parseRegexLiteral(token: string): BSONRegExp {
   return new BSONRegExp(pattern, flags)
 }
 
+// --- find 命令外壳剥离 -------------------------------------------------------
+
+/** db.getCollection("c").find( / db["c"].find( / db.c.find( 前缀（findOne 同样接受） */
+const FIND_SHELL_RE =
+  /^\s*db\s*\.\s*(?:getCollection\s*\(\s*(?<q1>["'])(?<n1>[^"']+)\k<q1>\s*\)|(?<n2>[A-Za-z0-9_$]+)|\[\s*(?<q2>["'])(?<n3>[^"']+)\k<q2>\s*\])\s*\.\s*(?:find|findOne)\s*\(/i
+
+/**
+ * 剥掉 db.getCollection("c").find( ... ) / db.c.find( ... ) 外壳，
+ * 只留 filter 文档文本；非 find 命令原样返回。
+ * 支持粘贴完整 shell 命令（含 ISODate 等 shell 构造器）到查询栏 / VQB 导入。
+ */
+export function stripFindShell(source: string): string {
+  const match = source.match(FIND_SHELL_RE)
+  if (match === null) return source
+  let body = source.slice(match[0].length).trim()
+  body = body.replace(/[;\s]+$/, '')
+  // 容忍 .toArray() 结尾（mongosh 常见写法）
+  body = body.replace(/\.toArray\s*\(\s*\)$/i, '').trim()
+  if (!body.endsWith(')')) return source
+  body = body.slice(0, -1).trim()
+  if (!body.startsWith('{') && !body.startsWith('[')) return source
+  return body
+}
+
 /** 解析一段受限 shell 字面量为 TS/BSON 值 */
 export function parseShellLiteral(source: string): Value {
   if (!source || !source.trim()) throw new ShellLiteralError('片段为空')
-  return new LiteralParser(tokenize(source)).parse()
+  return new LiteralParser(tokenize(stripFindShell(source))).parse()
 }

@@ -178,8 +178,13 @@ interface AppState {
   closeTab(id: string): void
   /** 更新当前活动页签的局部状态（新建引用触发渲染） */
   patchActive(patch: Partial<WorkTab>): void
-  runTab(tabId: string): Promise<void>
-  /** 执行一段 SQL 文本（单行/选中执行用），不改动编辑器内容 */
+  /**
+   * 执行页签查询。options.resetSkip 为 true 时先把 skip 归零——
+   * 查询栏/VQB 发起新查询用，避免停留在高页码而新结果不足该页数时出现空页；
+   * 分页条翻页不传（翻页自己设置 skip）。
+   */
+  runTab(tabId: string, options?: { resetSkip?: boolean }): Promise<void>
+  /** 执行一段 SQL 文本（单行/选中执行用），不改动编辑器内容；新查询回到第一页 */
   runSqlText(text: string): Promise<void>
   sampleForTab(tabId: string): Promise<void>
 
@@ -552,9 +557,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
   },
 
-  runTab: async (tabId) => {
+  runTab: async (tabId, options) => {
     const tab = get().tabs.find((item) => item.id === tabId)
     if (tab === undefined) return
+    // 新查询从第一页开始：skip 归零后 executeFind/executeSqlText 读到的就是 0
+    if (options?.resetSkip === true && tab.skip !== 0) {
+      set((state) => ({
+        tabs: state.tabs.map((item) => (item.id === tabId ? { ...item, skip: 0 } : item))
+      }))
+    }
     if (tab.queryMode === 'sql') {
       await executeSqlText(tabId, tab.sqlText)
       return
@@ -565,6 +576,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   runSqlText: async (text) => {
     const tabId = get().activeTabId
     if (tabId === null) return
+    // 新 SQL 查询从第一页开始；SQL 自带 OFFSET 时 translated.skip 会覆盖
+    const tab = get().tabs.find((item) => item.id === tabId)
+    if (tab !== undefined && tab.skip !== 0) {
+      set((state) => ({
+        tabs: state.tabs.map((item) => (item.id === tabId ? { ...item, skip: 0 } : item))
+      }))
+    }
     await executeSqlText(tabId, text)
   },
 
