@@ -27,7 +27,7 @@ function CreateIndexModal({
     setError(null)
     setSaving(true)
     const store = useAppStore.getState()
-    const connId = store.connId
+    const connId = store.tabs.find((t) => t.id === store.activeTabId)?.connId ?? null
     if (connId === null) {
       setSaving(false)
       setError('未连接')
@@ -108,7 +108,7 @@ function CreateIndexModal({
 }
 
 export function IndexPanel({ db, coll }: { db: string; coll: string }): JSX.Element {
-  const connId = useAppStore((s) => s.connId)
+  const connId = useAppStore((s) => s.tabs.find((t) => t.id === s.activeTabId)?.connId ?? null)
   const [indexes, setIndexes] = useState<IndexInfo[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)

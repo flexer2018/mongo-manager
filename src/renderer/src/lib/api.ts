@@ -28,6 +28,8 @@ export const backend = {
   saveConnection: (name: string, uri: string): Promise<SavedConnection[]> =>
     unwrap(api.saveConnection(name, uri)),
   removeSaved: (id: string): Promise<SavedConnection[]> => unwrap(api.removeSaved(id)),
+  saveConnColor: (uri: string, color: string): Promise<SavedConnection[]> =>
+    unwrap(api.saveConnColor(uri, color)),
 
   connect: (uri: string): Promise<ConnectResult> => unwrap(api.connect(uri)),
   disconnect: (connId: string): Promise<true> => unwrap(api.disconnect(connId)),

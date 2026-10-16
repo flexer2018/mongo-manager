@@ -14,6 +14,7 @@ const api: MongoApi = {
   listSaved: () => ipcRenderer.invoke(IPC.listSaved),
   saveConnection: (name, uri) => ipcRenderer.invoke(IPC.saveConnection, name, uri),
   removeSaved: (id) => ipcRenderer.invoke(IPC.removeSaved, id),
+  saveConnColor: (uri, color) => ipcRenderer.invoke(IPC.saveConnColor, uri, color),
 
   connect: (uri) => ipcRenderer.invoke(IPC.connect, uri),
   disconnect: (connId) => ipcRenderer.invoke(IPC.disconnect, connId),

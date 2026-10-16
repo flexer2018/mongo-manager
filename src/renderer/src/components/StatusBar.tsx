@@ -7,14 +7,14 @@ import { Database, Server } from 'lucide-react'
 import { useAppStore } from '../store/app-store'
 
 export function StatusBar(): JSX.Element {
-  const connId = useAppStore((s) => s.connId)
-  const connVersion = useAppStore((s) => s.connVersion)
+  const connections = useAppStore((s) => s.connections)
+  const activeConn = useAppStore((s) => s.connections.find((c) => c.connId === s.activeConnId) ?? null)
   const connecting = useAppStore((s) => s.connecting)
   const activeTab = useAppStore((s) => s.tabs.find((t) => t.id === s.activeTabId) ?? null)
 
   return (
     <div className="flex h-6 shrink-0 items-center gap-3 border-t border-line bg-panel px-2 text-[10px] text-text-muted">
-      {connId === null ? (
+      {activeConn === null ? (
         <span className="flex items-center gap-1.5">
           <span
             className={`size-1.5 rounded-full ${
@@ -25,9 +25,15 @@ export function StatusBar(): JSX.Element {
         </span>
       ) : (
         <span className="flex items-center gap-1.5">
-          <span className="size-1.5 animate-pulse rounded-full bg-accent" />
+          <span
+            className="size-1.5 animate-pulse rounded-full"
+            style={{ backgroundColor: activeConn.color }}
+          />
           <Server size={10} className="text-text-faint" />
-          MongoDB {connVersion}
+          MongoDB {activeConn.version}
+          {connections.length > 1 && (
+            <span className="text-text-faint">（共 {connections.length} 个连接）</span>
+          )}
         </span>
       )}
 

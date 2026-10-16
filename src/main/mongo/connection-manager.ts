@@ -125,3 +125,13 @@ export function removeSaved(id: string): SavedConnection[] {
   persistSaved(list)
   return list
 }
+
+/** 按 URI 回写连接标识色；未保存过的连接忽略 */
+export function updateSavedColor(uri: string, color: string): SavedConnection[] {
+  const list = loadSaved()
+  const index = list.findIndex((item) => item.uri === uri)
+  if (index < 0) return list
+  list[index] = { ...list[index], color }
+  persistSaved(list)
+  return list
+}

@@ -8,13 +8,14 @@ import { X } from 'lucide-react'
 import { useAppStore } from '../../store/app-store'
 
 interface CollModalProps {
+  connId: string
   mode: 'create' | 'rename'
   db: string
   coll?: string
   onClose(): void
 }
 
-export function CollModal({ mode, db, coll, onClose }: CollModalProps): JSX.Element {
+export function CollModal({ connId, mode, db, coll, onClose }: CollModalProps): JSX.Element {
   const [name, setName] = useState(mode === 'rename' ? (coll ?? '') : '')
   const [timeSeries, setTimeSeries] = useState(false)
   const [timeField, setTimeField] = useState('timestamp')
@@ -33,11 +34,11 @@ export function CollModal({ mode, db, coll, onClose }: CollModalProps): JSX.Elem
     const store = useAppStore.getState()
     const result =
       mode === 'create'
-        ? await store.createColl(db, trimmed, {
+        ? await store.createColl(connId, db, trimmed, {
             ...(timeSeries && timeField.trim() !== '' ? { timeField: timeField.trim() } : {}),
             ...(clustered ? { clustered: true } : {})
           })
-        : await store.renameColl(db, coll ?? '', trimmed)
+        : await store.renameColl(connId, db, coll ?? '', trimmed)
     setSaving(false)
     if (result.ok) {
       onClose()

@@ -9,6 +9,8 @@ export interface SavedConnection {
   name: string
   uri: string
   createdAt: number
+  /** 连接标识色（树上区分用），可空 */
+  color?: string
 }
 
 export interface ConnectResult {
@@ -98,6 +100,8 @@ export interface MongoApi {
   listSaved(): Promise<IpcResult<SavedConnection[]>>
   saveConnection(name: string, uri: string): Promise<IpcResult<SavedConnection[]>>
   removeSaved(id: string): Promise<IpcResult<SavedConnection[]>>
+  /** 按 URI 回写连接标识色（持久化） */
+  saveConnColor(uri: string, color: string): Promise<IpcResult<SavedConnection[]>>
 
   connect(uri: string): Promise<IpcResult<ConnectResult>>
   disconnect(connId: string): Promise<IpcResult<true>>
@@ -137,6 +141,7 @@ export const IPC = {
   listSaved: 'conn:listSaved',
   saveConnection: 'conn:save',
   removeSaved: 'conn:remove',
+  saveConnColor: 'conn:saveColor',
   connect: 'conn:connect',
   disconnect: 'conn:disconnect',
   listDatabases: 'db:list',

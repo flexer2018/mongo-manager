@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import {
   ChevronDown,
@@ -7,12 +7,15 @@ import {
   FolderOpen,
   Layers,
   Pencil,
+  PlugZap,
   Plus,
   Table2,
   Trash2
 } from 'lucide-react'
 import { CollectionKind, CollectionNode } from '@core'
 import { useAppStore } from '../../store/app-store'
+import type { ConnEntry } from '../../store/app-store'
+import { CONN_COLORS } from '../../store/app-store'
 import { CollModal } from './CollModal'
 
 /** 集合类型徽标：普通 c / 视图 v / 系统 s / 时间序列 ts / 聚簇 cl */
@@ -25,23 +28,31 @@ const KIND_BADGE: Record<string, { label: string; cls: string }> = {
 }
 
 function CollectionRow({
+  connId,
+  color,
   node,
   db,
   onRename
 }: {
+  connId: string
+  color: string
   node: CollectionNode
   db: string
   onRename(coll: string): void
 }): JSX.Element {
   const activeTab = useAppStore((s) => s.tabs.find((t) => t.id === s.activeTabId) ?? null)
   const openCollection = useAppStore((s) => s.openCollection)
-  const isActive = activeTab !== null && activeTab.db === db && activeTab.coll === node.name
+  const isActive =
+    activeTab !== null &&
+    activeTab.connId === connId &&
+    activeTab.db === db &&
+    activeTab.coll === node.name
   const badge = KIND_BADGE[node.kind] ?? KIND_BADGE.normal
   const isSystem = node.kind === CollectionKind.SYSTEM
 
   const drop = (): void => {
     if (!window.confirm(`确认删除集合 ${db}.${node.name}？其中的所有文档将永久丢失。`)) return
-    void useAppStore.getState().dropColl(db, node.name)
+    void useAppStore.getState().dropColl(connId, db, node.name)
   }
 
   return (
@@ -52,13 +63,15 @@ function CollectionRow({
     >
       <button
         type="button"
-        onClick={() => openCollection(db, node.name)}
+        onClick={() => openCollection(connId, db, node.name)}
         className={`flex h-6 min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-2 pl-7 text-left transition-colors duration-fast ${
           isActive ? 'text-accent' : 'text-text-secondary hover:text-text-primary'
         }`}
       >
         <Table2 size={11} className="shrink-0 text-text-faint" />
-        <span className="min-w-0 flex-1 truncate">{node.name}</span>
+        <span className="min-w-0 flex-1 truncate" style={{ color }}>
+          {node.name}
+        </span>
         {node.kind !== CollectionKind.NORMAL && (
           <span className={`rounded px-1 text-[9px] leading-4 ${badge.cls}`}>{badge.label}</span>
         )}
@@ -93,13 +106,12 @@ function CollectionRow({
   )
 }
 
-function DbRow({ name }: { name: string }): JSX.Element {
-  const expanded = useAppStore((s) => s.expandedDbs.includes(name))
+function DbRow({ connId, entry, name }: { connId: string; entry: ConnEntry; name: string }): JSX.Element {
+  const expanded = entry.expandedDbs.includes(name)
   const toggleDb = useAppStore((s) => s.toggleDb)
-  const tree = useAppStore((s) => s.tree)
   const nodes = useMemo(
-    () => (tree !== null ? collectionsOfLocal(tree, name) : []),
-    [tree, name, expanded]
+    () => (entry.tree !== null ? collectionsOfLocal(entry.tree, name) : []),
+    [entry.tree, name, entry.expandedDbs]
   )
   const [filter, setFilter] = useState('')
   const [modal, setModal] = useState<{ mode: 'create' | 'rename'; coll?: string } | null>(null)
@@ -110,7 +122,7 @@ function DbRow({ name }: { name: string }): JSX.Element {
       <div className="group flex h-6 w-full items-center rounded transition-colors duration-fast hover:bg-hover">
         <button
           type="button"
-          onClick={() => void toggleDb(name)}
+          onClick={() => void toggleDb(connId, name)}
           className="flex h-6 min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-2 text-left text-xs text-text-primary transition-colors duration-fast"
         >
           {expanded ? (
@@ -123,7 +135,9 @@ function DbRow({ name }: { name: string }): JSX.Element {
           ) : (
             <FolderClosed size={12} className="shrink-0 text-accent-dim" />
           )}
-          <span className="min-w-0 flex-1 truncate">{name}</span>
+          <span className="min-w-0 flex-1 truncate" style={{ color: entry.color }}>
+            {name}
+          </span>
           <span className="text-[10px] text-text-faint">{nodes.length}</span>
         </button>
         <button
@@ -149,6 +163,8 @@ function DbRow({ name }: { name: string }): JSX.Element {
           {visible.map((node) => (
             <CollectionRow
               key={node.name}
+              connId={connId}
+              color={entry.color}
               node={node}
               db={name}
               onRename={(coll) => setModal({ mode: 'rename', coll })}
@@ -162,6 +178,7 @@ function DbRow({ name }: { name: string }): JSX.Element {
 
       {modal !== null && (
         <CollModal
+          connId={connId}
           mode={modal.mode}
           db={name}
           coll={modal.coll}
@@ -172,21 +189,120 @@ function DbRow({ name }: { name: string }): JSX.Element {
   )
 }
 
+/** 连接分组：颜色点（可换色）+ 连接名 + 服务器版本 + 断开按钮，其下挂该连接的库列表 */
+function ConnGroup({ entry }: { entry: ConnEntry }): JSX.Element {
+  const activeConnId = useAppStore((s) => s.activeConnId)
+  const setActiveConn = useAppStore((s) => s.setActiveConn)
+  const setConnColor = useAppStore((s) => s.setConnColor)
+  const disconnect = useAppStore((s) => s.disconnect)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const pickerRef = useRef<HTMLDivElement | null>(null)
+  const isActive = activeConnId === entry.connId
+
+  // 点击色盘外部（含失焦）自动关闭
+  useEffect(() => {
+    if (!pickerOpen) return
+    const onPointerDown = (event: MouseEvent): void => {
+      if (pickerRef.current !== null && !pickerRef.current.contains(event.target as Node)) {
+        setPickerOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [pickerOpen])
+
+  const drop = (): void => {
+    if (!window.confirm(`确认断开连接「${entry.name}」？其打开的页签将一并关闭。`)) return
+    void disconnect(entry.connId)
+  }
+
+  return (
+    <div className="mb-1">
+      <div
+        className={`group flex h-6 w-full items-center rounded px-2 transition-colors duration-fast ${
+          isActive ? 'bg-active' : 'hover:bg-hover'
+        }`}
+      >
+        <div className="relative shrink-0" ref={pickerRef}>
+          <button
+            type="button"
+            title="连接颜色"
+            onClick={() => setPickerOpen((open) => !open)}
+            className={`block size-1.5 cursor-pointer rounded-full ${
+              isActive ? 'animate-pulse' : ''
+            }`}
+            style={{ backgroundColor: entry.color }}
+          />
+          {pickerOpen && (
+            <div className="absolute left-0 top-4 z-50 flex gap-1 rounded-md border border-line bg-elevated p-1.5 shadow-xl">
+              {CONN_COLORS.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  title={color}
+                  onClick={() => {
+                    setConnColor(entry.connId, color)
+                    setPickerOpen(false)
+                  }}
+                  className="size-3.5 cursor-pointer rounded-full transition-transform duration-fast hover:scale-110"
+                  style={{
+                    backgroundColor: color,
+                    outline:
+                      color === entry.color ? `1px solid ${color}` : undefined,
+                    outlineOffset: 1
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => setActiveConn(entry.connId)}
+          title="设为活动连接（新页签默认使用）"
+          className={`flex h-6 min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-1.5 text-left text-xs transition-colors duration-fast ${
+            isActive ? 'text-accent' : 'text-text-primary'
+          }`}
+        >
+          <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
+          <span className="shrink-0 text-[10px] text-text-faint">v{entry.version}</span>
+        </button>
+        <button
+          type="button"
+          title="断开该连接"
+          onClick={drop}
+          className="shrink-0 cursor-pointer p-0.5 text-text-faint opacity-0 transition-all duration-fast group-hover:opacity-100 hover:text-danger"
+        >
+          <PlugZap size={11} />
+        </button>
+      </div>
+
+      <div>
+        {entry.databases.map((db) => (
+          <DbRow key={db.name} connId={entry.connId} entry={entry} name={db.name} />
+        ))}
+        {entry.databases.length === 0 && (
+          <div className="px-7 py-1 text-[10px] text-text-faint">未加载到数据库</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // 局部助手，避免在组件外引用 store
-function collectionsOfLocal(tree: NonNullable<ReturnType<typeof useAppStore.getState>['tree']>, db: string): CollectionNode[] {
+function collectionsOfLocal(tree: NonNullable<ReturnType<typeof useAppStore.getState>['connections'][number]['tree']>, db: string): CollectionNode[] {
   const node = tree.node(db)
   if (node === null) return []
   const contents = node.contents
   return [...contents.collections, ...contents.views, ...contents.system]
 }
 
-/** 左侧导航栏：连接 → 库 → 集合 三级懒加载树 */
+/** 左侧导航栏：连接 → 库 → 集合 三级懒加载树，支持同时显示多个连接 */
 export function NavTree(): JSX.Element {
-  const connId = useAppStore((s) => s.connId)
-  const databases = useAppStore((s) => s.databases)
+  const connections = useAppStore((s) => s.connections)
   const collectionError = useAppStore((s) => s.collectionError)
 
-  if (connId === null) {
+  if (connections.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-4 text-center">
         <Layers size={22} className="text-text-faint" />
@@ -194,6 +310,8 @@ export function NavTree(): JSX.Element {
           连接一个 MongoDB 实例后
           <br />
           数据库与集合会在这里展开
+          <br />
+          支持同时连接多个实例
         </div>
       </div>
     )
@@ -202,15 +320,12 @@ export function NavTree(): JSX.Element {
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-7 shrink-0 items-center gap-1.5 border-b border-line px-2 text-[10px] uppercase tracking-wider text-text-muted">
-        数据库
+        连接 · 数据库
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {databases.map((db) => (
-          <DbRow key={db.name} name={db.name} />
+        {connections.map((entry) => (
+          <ConnGroup key={entry.connId} entry={entry} />
         ))}
-        {databases.length === 0 && (
-          <div className="px-3 py-2 text-2xs text-text-muted">未加载到数据库</div>
-        )}
       </div>
       {collectionError !== null && (
         <div className="shrink-0 border-t border-line bg-danger/10 px-2 py-1 text-[10px] text-danger">

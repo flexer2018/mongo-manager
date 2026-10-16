@@ -10,7 +10,8 @@ import {
   ConnectionManager,
   addSaved,
   loadSaved,
-  removeSaved
+  removeSaved,
+  updateSavedColor
 } from './connection-manager'
 import {
   AggregateRequest,
@@ -98,6 +99,7 @@ export function registerMongoHandlers(): void {
   handle(IPC.listSaved, async () => loadSaved())
   handle(IPC.saveConnection, async (name: string, uri: string) => addSaved(name, uri))
   handle(IPC.removeSaved, async (id: string) => removeSaved(id))
+  handle(IPC.saveConnColor, async (uri: string, color: string) => updateSavedColor(uri, color))
 
   handle(IPC.connect, async (uri: string) => connections.connect(uri))
 

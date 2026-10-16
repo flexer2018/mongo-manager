@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { JSX } from 'react'
 import { Braces, Table2, X } from 'lucide-react'
 import { useAppStore } from '../../store/app-store'
@@ -13,8 +13,13 @@ export function Workbench(): JSX.Element {
   const activeTabId = useAppStore((s) => s.activeTabId)
   const setActiveTab = useAppStore((s) => s.setActiveTab)
   const closeTab = useAppStore((s) => s.closeTab)
+  const connections = useAppStore((s) => s.connections)
   const [view, setView] = useState<'results' | 'code'>('results')
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
+  const connColors = useMemo(
+    () => new Map(connections.map((conn) => [conn.connId, conn.color])),
+    [connections]
+  )
 
   if (activeTab === null) {
     return (
@@ -43,7 +48,10 @@ export function Workbench(): JSX.Element {
             }`}
           >
             <span className="mono max-w-44 truncate">
-              {tab.db}.<span className="font-semibold">{tab.coll}</span>
+              {tab.db}.
+              <span className="font-semibold" style={{ color: connColors.get(tab.connId) }}>
+                {tab.coll}
+              </span>
             </span>
             {tab.running && <span className="size-1.5 animate-pulse rounded-full bg-warning" />}
             <X

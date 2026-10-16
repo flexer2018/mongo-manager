@@ -6,8 +6,8 @@ import { ConnectDialog } from './ConnectDialog'
 
 /** 顶部工具条：应用标识 + 连接状态灯 + 连接管理入口 + 主题切换 */
 export function Toolbar(): JSX.Element {
-  const connId = useAppStore((s) => s.connId)
-  const connVersion = useAppStore((s) => s.connVersion)
+  const connections = useAppStore((s) => s.connections)
+  const activeConn = useAppStore((s) => s.connections.find((c) => c.connId === s.activeConnId) ?? null)
   const connecting = useAppStore((s) => s.connecting)
   const saved = useAppStore((s) => s.saved)
   const connect = useAppStore((s) => s.connect)
@@ -17,7 +17,7 @@ export function Toolbar(): JSX.Element {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
 
-  const connected = connId !== null
+  const connected = connections.length > 0
 
   return (
     <header className="no-drag flex h-11 shrink-0 items-center gap-3 border-b border-line bg-panel px-3">
@@ -42,15 +42,16 @@ export function Toolbar(): JSX.Element {
               connecting
                 ? 'animate-pulse bg-warning'
                 : connected
-                  ? 'animate-pulse bg-accent shadow-[0_0_6px_rgba(0,210,106,0.8)]'
+                  ? 'animate-pulse shadow-[0_0_6px_rgba(0,210,106,0.8)]'
                   : 'bg-text-faint'
             }`}
+            style={connected ? { backgroundColor: activeConn?.color } : undefined}
           />
           <span className="max-w-52 truncate">
             {connecting
               ? '连接中…'
               : connected
-                ? `已连接 · MongoDB ${connVersion}`
+                ? `已连接 ${connections.length} 个 · MongoDB ${activeConn?.version ?? ''}`
                 : '未连接'}
           </span>
           <ChevronDown size={12} className="text-text-muted" />
@@ -67,12 +68,18 @@ export function Toolbar(): JSX.Element {
                 type="button"
                 onClick={() => {
                   setPickerOpen(false)
-                  void connect(item.uri)
+                  void connect(item.uri, item.name, item.color)
                 }}
                 className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-2xs text-text-secondary transition-colors duration-fast hover:bg-hover hover:text-text-primary"
               >
                 <Plug size={12} className="shrink-0 text-accent-dim" />
                 <span className="flex-1 truncate">{item.name}</span>
+                {item.color !== undefined && (
+                  <span
+                    className="size-1.5 shrink-0 rounded-full"
+                    style={{ backgroundColor: item.color }}
+                  />
+                )}
               </button>
             ))}
             <div className="my-1 border-t border-line" />
@@ -106,6 +113,7 @@ export function Toolbar(): JSX.Element {
       <button
         type="button"
         disabled={!connected}
+        title={activeConn !== null ? `断开「${activeConn.name}」` : undefined}
         onClick={() => void disconnect()}
         className={`flex h-7 items-center gap-1.5 rounded border px-2.5 text-2xs transition-colors duration-fast ${
           connected

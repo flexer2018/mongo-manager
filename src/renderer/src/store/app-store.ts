@@ -29,6 +29,8 @@ import { backend } from '../lib/api'
 /** 一个集合页签的全部独立状态 */
 export interface WorkTab {
   id: string
+  /** 页签所属连接，跨连接打开集合时互不干扰 */
+  connId: string
   db: string
   coll: string
   /** 查询栏模式：json = filter 文档 / sql = MySQL SELECT 子集 */
@@ -53,13 +55,42 @@ export interface WorkTab {
 
 export type ThemeName = 'dark' | 'light'
 
+/** 连接颜色预置色盘：树上用颜色区分不同连接 */
+export const CONN_COLORS = [
+  '#4f8cff',
+  '#22c55e',
+  '#eab308',
+  '#f97316',
+  '#ec4899',
+  '#a855f7',
+  '#14b8a6',
+  '#ef4444'
+] as const
+
+/** 一个已建立连接在渲染进程的独立状态（树 / 库列表 / 展开状态） */
+export interface ConnEntry {
+  connId: string
+  /** 建立连接用的 URI，用于同一连接去重 */
+  uri: string
+  /** 连接显示名：来自保存列表或 URI 主机部分 */
+  name: string
+  /** 主题色：树上区分不同连接（取自 CONN_COLORS） */
+  color: string
+  version: string
+  defaultDb: string
+  tree: DatabaseTree
+  databases: DatabaseSummary[]
+  expandedDbs: string[]
+}
+
 function newTabId(): string {
   return `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`
 }
 
-function makeTab(db: string, coll: string): WorkTab {
+function makeTab(connId: string, db: string, coll: string): WorkTab {
   return {
     id: newTabId(),
+    connId,
     db,
     coll,
     queryMode: 'json',
@@ -97,6 +128,21 @@ function toEjsonText(text: string): string {
   return EJSON.stringify(parsed, { relaxed: false })
 }
 
+/** 从 URI 截取连接显示名（host:port），密码等敏感部分不进入名称 */
+function connNameFromUri(uri: string): string {
+  const rest = uri.includes('://') ? uri.slice(uri.indexOf('://') + 3) : uri
+  const at = rest.lastIndexOf('@')
+  const hostPart = (at >= 0 ? rest.slice(at + 1) : rest).split('?')[0]
+  return hostPart === '' ? `连接 ${Date.now() % 1000}` : hostPart
+}
+
+/** 为新连接挑选色盘颜色：优先未被占用的，否则轮换 */
+function pickConnColor(connections: ConnEntry[]): string {
+  const used = new Set(connections.map((item) => item.color))
+  const available = CONN_COLORS.find((color) => !used.has(color))
+  return available ?? CONN_COLORS[connections.length % CONN_COLORS.length]
+}
+
 interface AppState {
   // ---- 主题 ----
   theme: ThemeName
@@ -104,30 +150,30 @@ interface AppState {
 
   // ---- 连接 ----
   saved: SavedConnection[]
-  connId: string | null
-  connVersion: string
-  defaultDb: string
+  connections: ConnEntry[]
+  activeConnId: string | null
   connecting: boolean
   connError: string | null
 
   loadSaved(): Promise<void>
   saveConnection(name: string, uri: string): Promise<void>
   removeSaved(id: string): Promise<void>
-  connect(uri: string): Promise<void>
-  disconnect(): Promise<void>
+  connect(uri: string, name?: string, color?: string): Promise<void>
+  /** 断开指定连接；缺省断开当前活动连接 */
+  disconnect(connId?: string): Promise<void>
+  setActiveConn(connId: string): void
+  /** 修改连接主题色（树上标识用） */
+  setConnColor(connId: string, color: string): void
 
   // ---- 导航树 ----
-  databases: DatabaseSummary[]
-  tree: DatabaseTree | null
-  expandedDbs: string[]
   collectionError: string | null
-  loadDatabases(): Promise<void>
-  toggleDb(db: string): Promise<void>
+  loadDatabases(connId: string): Promise<void>
+  toggleDb(connId: string, db: string): Promise<void>
 
   // ---- 集合页签（多开） ----
   tabs: WorkTab[]
   activeTabId: string | null
-  openCollection(db: string, coll: string): void
+  openCollection(connId: string, db: string, coll: string): void
   setActiveTab(id: string): void
   closeTab(id: string): void
   /** 更新当前活动页签的局部状态（新建引用触发渲染） */
@@ -146,9 +192,9 @@ interface AppState {
   deleteDoc(id: string): Promise<{ ok: boolean; error?: string }>
 
   // ---- 集合管理（二期）----
-  createColl(db: string, name: string, opts?: CreateCollectionOptions): Promise<{ ok: boolean; error?: string }>
-  dropColl(db: string, name: string): Promise<{ ok: boolean; error?: string }>
-  renameColl(db: string, oldName: string, newName: string): Promise<{ ok: boolean; error?: string }>
+  createColl(connId: string, db: string, name: string, opts?: CreateCollectionOptions): Promise<{ ok: boolean; error?: string }>
+  dropColl(connId: string, db: string, name: string): Promise<{ ok: boolean; error?: string }>
+  renameColl(connId: string, db: string, oldName: string, newName: string): Promise<{ ok: boolean; error?: string }>
 
   // ---- 索引管理（二期）----
   listIdx(connId: string, db: string, coll: string): Promise<IndexInfo[]>
@@ -169,21 +215,25 @@ function commitTree(tab: WorkTab, tree: QueryGroup): Partial<WorkTab> {
 }
 
 /** 集合变更后：强制重载该库的分桶缓存，并触发一次渲染 */
-async function refreshDb(db: string): Promise<void> {
+async function refreshDb(connId: string, db: string): Promise<void> {
   const store = useAppStore.getState()
-  if (store.tree !== null) {
-    await store.tree.load(db, true).catch((exc) => console.error('刷新集合失败:', exc))
-  }
-  useAppStore.setState((state) => ({ expandedDbs: [...state.expandedDbs] }))
-  void useAppStore.getState().loadDatabases()
+  const entry = store.connections.find((item) => item.connId === connId)
+  if (entry === undefined) return
+  await entry.tree.load(db, true).catch((exc) => console.error('刷新集合失败:', exc))
+  useAppStore.setState((state) => ({
+    connections: state.connections.map((item) =>
+      item.connId === connId ? { ...item, expandedDbs: [...item.expandedDbs] } : item
+    )
+  }))
+  void useAppStore.getState().loadDatabases(connId)
 }
 
 /** 执行 JSON filter 查询并写入页签结果（skip/limit 读自页签当前状态） */
 async function executeFind(tabId: string): Promise<void> {
   const store = useAppStore.getState()
-  const { connId } = store
   const tab = store.tabs.find((item) => item.id === tabId)
-  if (connId === null || tab === undefined) return
+  if (tab === undefined) return
+  const connId = tab.connId
   useAppStore.setState((state) => ({
     tabs: state.tabs.map((item) => (item.id === tabId ? { ...item, running: true, runError: null } : item))
   }))
@@ -231,9 +281,9 @@ async function executeFind(tabId: string): Promise<void> {
 /** 翻译并执行一段 SQL 文本（不改动编辑器内容）；聚合走 runAggregate，find 先同步分段 */
 async function executeSqlText(tabId: string, sqlText: string): Promise<void> {
   const store = useAppStore.getState()
-  const { connId } = store
   const tab = store.tabs.find((item) => item.id === tabId)
-  if (connId === null || tab === undefined) return
+  if (tab === undefined) return
+  const connId = tab.connId
   let translated: ReturnType<typeof sqlToMongo>
   try {
     translated = sqlToMongo(sqlText)
@@ -322,9 +372,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   saved: [],
-  connId: null,
-  connVersion: '',
-  defaultDb: '',
+  connections: [],
+  activeConnId: null,
   connecting: false,
   connError: null,
 
@@ -344,15 +393,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ saved: await backend.removeSaved(id) })
   },
 
-  connect: async (uri) => {
+  connect: async (uri, name, color) => {
+    // 同一 URI 已连接：直接聚焦到已有连接，避免在树上重复出现
+    const existing = get().connections.find((item) => item.uri === uri)
+    if (existing !== undefined) {
+      set({ activeConnId: existing.connId })
+      return
+    }
     set({ connecting: true, connError: null })
     try {
       const result = await backend.connect(uri)
-      set((state) => ({
+      const entry: ConnEntry = {
         connId: result.connId,
-        connVersion: result.version,
+        uri,
+        name: name !== undefined && name.trim() !== '' ? name.trim() : connNameFromUri(uri),
+        color: color ?? pickConnColor(get().connections),
+        version: result.version,
         defaultDb: result.defaultDb,
-        connecting: false,
         tree: new DatabaseTree(
           async (db) => {
             const raw = await backend.listCollections(result.connId, db)
@@ -361,61 +418,100 @@ export const useAppStore = create<AppState>((set, get) => ({
           async () => (await backend.listDatabases(result.connId)).map((db) => db.name)
         ),
         databases: [],
-        expandedDbs: [],
-        tabs: [],
-        activeTabId: null
+        expandedDbs: []
+      }
+      set((state) => ({
+        connections: [...state.connections, entry],
+        activeConnId: result.connId,
+        connecting: false
       }))
-      await get().loadDatabases()
+      await get().loadDatabases(result.connId)
     } catch (exc) {
       set({ connecting: false, connError: exc instanceof Error ? exc.message : String(exc) })
     }
   },
 
-  disconnect: async () => {
-    const connId = get().connId
-    if (connId === null) return
-    await backend.disconnect(connId).catch((exc) => console.error('断开失败:', exc))
-    set({
-      connId: null,
-      connVersion: '',
-      defaultDb: '',
-      databases: [],
-      tree: null,
-      expandedDbs: [],
-      tabs: [],
-      activeTabId: null
+  disconnect: async (connId) => {
+    const target = connId ?? get().activeConnId
+    if (target === null) return
+    await backend.disconnect(target).catch((exc) => console.error('断开失败:', exc))
+    set((state) => {
+      const connections = state.connections.filter((item) => item.connId !== target)
+      // 关闭该连接下打开的页签，避免引用已断开的连接
+      const tabs = state.tabs.filter((tab) => tab.connId !== target)
+      const activeTabId =
+        state.activeTabId !== null && tabs.some((tab) => tab.id === state.activeTabId)
+          ? state.activeTabId
+          : (tabs[tabs.length - 1]?.id ?? null)
+      return {
+        connections,
+        tabs,
+        activeTabId,
+        activeConnId:
+          state.activeConnId === target
+            ? (connections[connections.length - 1]?.connId ?? null)
+            : state.activeConnId
+      }
     })
   },
 
-  databases: [],
-  tree: null,
-  expandedDbs: [],
+  setActiveConn: (connId) => set({ activeConnId: connId }),
+
+  setConnColor: (connId, color) => {
+    set((state) => ({
+      connections: state.connections.map((item) =>
+        item.connId === connId ? { ...item, color } : item
+      )
+    }))
+    // 回写到保存的连接列表（按 URI 匹配持久化），保持下次连接颜色一致
+    const entry = get().connections.find((item) => item.connId === connId)
+    if (entry !== undefined) {
+      void backend
+        .saveConnColor(entry.uri, color)
+        .then((saved) => set({ saved }))
+        .catch((exc) => console.error('持久化连接颜色失败:', exc))
+    }
+  },
+
   collectionError: null,
 
-  loadDatabases: async () => {
-    const connId = get().connId
-    if (connId === null) return
+  loadDatabases: async (connId) => {
     try {
-      set({ databases: await backend.listDatabases(connId) })
+      const databases = await backend.listDatabases(connId)
+      set((state) => ({
+        connections: state.connections.map((item) =>
+          item.connId === connId ? { ...item, databases } : item
+        )
+      }))
     } catch (exc) {
       console.error('列出数据库失败:', exc)
     }
   },
 
-  toggleDb: async (db) => {
-    const expanded = get().expandedDbs
-    const tree = get().tree
-    if (tree === null) return
-    if (expanded.includes(db)) {
-      set({ expandedDbs: expanded.filter((name) => name !== db) })
+  toggleDb: async (connId, db) => {
+    const entry = get().connections.find((item) => item.connId === connId)
+    if (entry === undefined) return
+    const patchDbs = (expandedDbs: string[]): void =>
+      set((state) => ({
+        connections: state.connections.map((item) =>
+          item.connId === connId ? { ...item, expandedDbs } : item
+        )
+      }))
+    if (entry.expandedDbs.includes(db)) {
+      patchDbs(entry.expandedDbs.filter((name) => name !== db))
       return
     }
-    set({ expandedDbs: [...expanded, db], collectionError: null })
-    const node = tree.node(db)
+    patchDbs([...entry.expandedDbs, db])
+    set({ collectionError: null })
+    const node = entry.tree.node(db)
     if (node !== null && node.contents.loaded) return
     try {
-      await tree.load(db)
-      set({ expandedDbs: [...get().expandedDbs] })
+      await entry.tree.load(db)
+      set((state) => ({
+        connections: state.connections.map((item) =>
+          item.connId === connId ? { ...item, expandedDbs: [...item.expandedDbs] } : item
+        )
+      }))
     } catch (exc) {
       set({ collectionError: exc instanceof Error ? exc.message : String(exc) })
     }
@@ -425,13 +521,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeTabId: null,
 
   /** 打开（或聚焦）一个集合页签，并自动运行首次查询 */
-  openCollection: (db, coll) => {
-    const existing = get().tabs.find((tab) => tab.db === db && tab.coll === coll)
+  openCollection: (connId, db, coll) => {
+    const existing = get().tabs.find(
+      (tab) => tab.connId === connId && tab.db === db && tab.coll === coll
+    )
     if (existing !== undefined) {
       set({ activeTabId: existing.id })
       return
     }
-    const tab = makeTab(db, coll)
+    const tab = makeTab(connId, db, coll)
     set((state) => ({ tabs: [...state.tabs, tab], activeTabId: tab.id }))
     void get().runTab(tab.id)
     void get().sampleForTab(tab.id)
@@ -471,9 +569,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   sampleForTab: async (tabId) => {
-    const { connId, tabs } = get()
+    const { tabs } = get()
     const tab = tabs.find((item) => item.id === tabId)
-    if (connId === null || tab === undefined) return
+    if (tab === undefined) return
+    const connId = tab.connId
     set((state) => ({
       tabs: state.tabs.map((item) => (item.id === tabId ? { ...item, sampling: true } : item))
     }))
@@ -502,9 +601,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   // ---- 文档 CRUD（二期）----
 
   insertDoc: async (docText) => {
-    const { connId, tabs, activeTabId } = get()
+    const { tabs, activeTabId } = get()
     const tab = tabs.find((item) => item.id === activeTabId)
-    if (connId === null || tab === undefined) return { ok: false, error: '无活动集合页签' }
+    if (tab === undefined) return { ok: false, error: '无活动集合页签' }
+    const connId = tab.connId
     try {
       await backend.insertOne(connId, tab.db, tab.coll, toEjsonText(docText))
       await get().runTab(tab.id)
@@ -515,9 +615,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   updateDoc: async (id, docText) => {
-    const { connId, tabs, activeTabId } = get()
+    const { tabs, activeTabId } = get()
     const tab = tabs.find((item) => item.id === activeTabId)
-    if (connId === null || tab === undefined) return { ok: false, error: '无活动集合页签' }
+    if (tab === undefined) return { ok: false, error: '无活动集合页签' }
+    const connId = tab.connId
     try {
       await backend.replaceOne({ connId, db: tab.db, coll: tab.coll, id }, toEjsonText(docText))
       await get().runTab(tab.id)
@@ -528,9 +629,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   deleteDoc: async (id) => {
-    const { connId, tabs, activeTabId } = get()
+    const { tabs, activeTabId } = get()
     const tab = tabs.find((item) => item.id === activeTabId)
-    if (connId === null || tab === undefined) return { ok: false, error: '无活动集合页签' }
+    if (tab === undefined) return { ok: false, error: '无活动集合页签' }
+    const connId = tab.connId
     try {
       await backend.deleteOne({ connId, db: tab.db, coll: tab.coll, id })
       await get().runTab(tab.id)
@@ -542,51 +644,49 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // ---- 集合管理（二期）----
 
-  createColl: async (db, name, opts) => {
-    const connId = get().connId
-    if (connId === null) return { ok: false, error: '未连接' }
+  createColl: async (connId, db, name, opts) => {
     try {
       await backend.createCollection(connId, db, name, opts)
-      await refreshDb(db)
+      await refreshDb(connId, db)
       return { ok: true }
     } catch (exc) {
       return { ok: false, error: exc instanceof Error ? exc.message : String(exc) }
     }
   },
 
-  dropColl: async (db, name) => {
-    const connId = get().connId
-    if (connId === null) return { ok: false, error: '未连接' }
+  dropColl: async (connId, db, name) => {
     try {
       await backend.dropCollection(connId, db, name)
       // 关闭该集合的页签，避免引用已删除的命名空间
       set((state) => {
-        const tabs = state.tabs.filter((tab) => !(tab.db === db && tab.coll === name))
+        const tabs = state.tabs.filter(
+          (tab) => !(tab.connId === connId && tab.db === db && tab.coll === name)
+        )
         const activeTabId =
           state.activeTabId !== null && tabs.some((tab) => tab.id === state.activeTabId)
             ? state.activeTabId
             : (tabs[tabs.length - 1]?.id ?? null)
         return { tabs, activeTabId }
       })
-      await refreshDb(db)
+      await refreshDb(connId, db)
       return { ok: true }
     } catch (exc) {
       return { ok: false, error: exc instanceof Error ? exc.message : String(exc) }
     }
   },
 
-  renameColl: async (db, oldName, newName) => {
-    const connId = get().connId
-    if (connId === null) return { ok: false, error: '未连接' }
+  renameColl: async (connId, db, oldName, newName) => {
     try {
       await backend.renameCollection(connId, db, oldName, newName)
       // 已打开的页签跟随改名
       set((state) => ({
         tabs: state.tabs.map((tab) =>
-          tab.db === db && tab.coll === oldName ? { ...tab, coll: newName } : tab
+          tab.connId === connId && tab.db === db && tab.coll === oldName
+            ? { ...tab, coll: newName }
+            : tab
         )
       }))
-      await refreshDb(db)
+      await refreshDb(connId, db)
       return { ok: true }
     } catch (exc) {
       return { ok: false, error: exc instanceof Error ? exc.message : String(exc) }
