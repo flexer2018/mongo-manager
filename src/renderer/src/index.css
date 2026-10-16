@@ -1,0 +1,129 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 主题令牌（RGB 通道值，供 rgb(var(--x) / alpha) 使用） */
+:root {
+  /* 暗色（默认）：深蓝黑多层面板 */
+  --c-base: 14 18 23;
+  --c-panel: 20 26 33;
+  --c-elevated: 26 35 44;
+  --c-hover: 33 45 56;
+  --c-active: 24 38 53;
+  --c-line: 38 49 64;
+  --c-line-strong: 52 69 92;
+  --c-accent: 0 210 106;
+  --c-accent-bright: 0 237 100;
+  --c-accent-dim: 10 143 85;
+  --c-on-accent: 6 20 14;
+  --c-text-primary: 230 237 243;
+  --c-text-secondary: 159 176 192;
+  --c-text-muted: 100 116 139;
+  --c-text-faint: 71 86 107;
+  --c-danger: 248 113 113;
+  --c-warning: 251 191 36;
+  /* BSON 类型着色（暗底亮字） */
+  --c-bson-string: 74 222 128;
+  --c-bson-number: 96 165 250;
+  --c-bson-long: 56 189 248;
+  --c-bson-double: 125 211 252;
+  --c-bson-decimal: 129 140 248;
+  --c-bson-boolean: 250 204 21;
+  --c-bson-date: 192 132 252;
+  --c-bson-null: 248 113 113;
+  --c-bson-objectid: 34 211 238;
+  --c-bson-array: 251 146 60;
+  --c-bson-object: 148 163 184;
+  --c-bson-binary: 176 137 104;
+  --c-bson-regex: 244 114 182;
+}
+
+html.light {
+  /* 日间模式：浅灰蓝分层 */
+  --c-base: 243 245 248;
+  --c-panel: 255 255 255;
+  --c-elevated: 250 251 253;
+  --c-hover: 235 239 244;
+  --c-active: 225 235 245;
+  --c-line: 220 227 235;
+  --c-line-strong: 176 190 205;
+  --c-accent: 0 122 61;
+  --c-accent-bright: 0 158 79;
+  --c-accent-dim: 0 106 53;
+  --c-on-accent: 255 255 255;
+  --c-text-primary: 24 32 44;
+  --c-text-secondary: 71 86 104;
+  --c-text-muted: 110 124 140;
+  --c-text-faint: 148 160 174;
+  --c-danger: 200 48 48;
+  --c-warning: 176 118 0;
+  /* BSON 类型着色（白底深字，可读性优先） */
+  --c-bson-string: 22 122 62;
+  --c-bson-number: 37 99 235;
+  --c-bson-long: 2 132 199;
+  --c-bson-double: 14 116 144;
+  --c-bson-decimal: 79 70 229;
+  --c-bson-boolean: 161 98 7;
+  --c-bson-date: 124 58 237;
+  --c-bson-null: 185 28 28;
+  --c-bson-objectid: 8 134 156;
+  --c-bson-array: 194 65 12;
+  --c-bson-object: 71 85 105;
+  --c-bson-binary: 146 94 51;
+  --c-bson-regex: 190 24 93;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    @apply bg-base text-text-primary font-sans text-[13px] antialiased select-none;
+    color-scheme: dark;
+  }
+  html.light body {
+    color-scheme: light;
+  }
+  code,
+  pre,
+  .mono {
+    font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--c-line-strong) / 0.55);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--c-line-strong) / 0.9);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  input,
+  textarea {
+    @apply select-text;
+  }
+}
+
+@layer utilities {
+  .panel {
+    @apply bg-panel border border-line;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+}

@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+out/
+dist/
+
+# 构建缓存
+*.tsbuildinfo
+
+# 本地环境与凭据（冒烟脚本凭据走 MONGO_SMOKE_URI 环境变量）
+.env
+.env.*
+*.local
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+# 测试与覆盖率
+coverage/
