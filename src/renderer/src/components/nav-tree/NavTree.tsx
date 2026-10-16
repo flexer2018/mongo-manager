@@ -16,6 +16,7 @@ import { CollectionKind, CollectionNode } from '@core'
 import { useAppStore } from '../../store/app-store'
 import type { ConnEntry } from '../../store/app-store'
 import { CONN_COLORS } from '../../store/app-store'
+import { ConfirmDialog } from '../ConfirmDialog'
 import { CollModal } from './CollModal'
 
 /** 集合类型徽标：普通 c / 视图 v / 系统 s / 时间序列 ts / 聚簇 cl */
@@ -50,9 +51,10 @@ function CollectionRow({
   const badge = KIND_BADGE[node.kind] ?? KIND_BADGE.normal
   const isSystem = node.kind === CollectionKind.SYSTEM
 
+  const [confirmDrop, setConfirmDrop] = useState(false)
+
   const drop = (): void => {
-    if (!window.confirm(`确认删除集合 ${db}.${node.name}？其中的所有文档将永久丢失。`)) return
-    void useAppStore.getState().dropColl(connId, db, node.name)
+    setConfirmDrop(true)
   }
 
   return (
@@ -101,6 +103,20 @@ function CollectionRow({
             <Trash2 size={11} />
           </button>
         </div>
+      )}
+      {confirmDrop && (
+        <ConfirmDialog
+          title="删除集合"
+          message={`确认删除集合 ${db}.${node.name}？其中的所有文档将永久丢失。`}
+          danger
+          confirmText="删除"
+          confirmKeyword="delete"
+          onConfirm={() => {
+            setConfirmDrop(false)
+            void useAppStore.getState().dropColl(connId, db, node.name)
+          }}
+          onClose={() => setConfirmDrop(false)}
+        />
       )}
     </div>
   )
@@ -211,9 +227,10 @@ function ConnGroup({ entry }: { entry: ConnEntry }): JSX.Element {
     return () => document.removeEventListener('mousedown', onPointerDown)
   }, [pickerOpen])
 
+  const [confirmDrop, setConfirmDrop] = useState(false)
+
   const drop = (): void => {
-    if (!window.confirm(`确认断开连接「${entry.name}」？其打开的页签将一并关闭。`)) return
-    void disconnect(entry.connId)
+    setConfirmDrop(true)
   }
 
   return (
@@ -285,6 +302,19 @@ function ConnGroup({ entry }: { entry: ConnEntry }): JSX.Element {
           <div className="px-7 py-1 text-[10px] text-text-faint">未加载到数据库</div>
         )}
       </div>
+      {confirmDrop && (
+        <ConfirmDialog
+          title="断开连接"
+          message={`确认断开连接「${entry.name}」？其打开的页签将一并关闭。`}
+          danger
+          confirmText="断开"
+          onConfirm={() => {
+            setConfirmDrop(false)
+            void disconnect(entry.connId)
+          }}
+          onClose={() => setConfirmDrop(false)}
+        />
+      )}
     </div>
   )
 }

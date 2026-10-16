@@ -7,6 +7,7 @@ import type { JSX } from 'react'
 import { Plus, RefreshCw, Trash2, X } from 'lucide-react'
 import type { IndexInfo } from '../../../../shared/types'
 import { useAppStore } from '../../store/app-store'
+import { ConfirmDialog } from '../ConfirmDialog'
 
 /** 创建索引小模态：keys 与 options 均为 EJSON（兼容 shell 语法） */
 function CreateIndexModal({
@@ -128,8 +129,16 @@ export function IndexPanel({ db, coll }: { db: string; coll: string }): JSX.Elem
     void reload()
   }, [reload])
 
+  const [pendingDrop, setPendingDrop] = useState<string | null>(null)
+
   const drop = (name: string): void => {
-    if (!window.confirm(`确认删除索引 ${name}？`)) return
+    setPendingDrop(name)
+  }
+
+  const confirmDrop = (): void => {
+    if (pendingDrop === null) return
+    const name = pendingDrop
+    setPendingDrop(null)
     const store = useAppStore.getState()
     if (connId === null) return
     void store.dropIdx(connId, db, coll, name).then((result) => {
@@ -212,6 +221,16 @@ export function IndexPanel({ db, coll }: { db: string; coll: string }): JSX.Elem
         )}
       </div>
       {creating && <CreateIndexModal db={db} coll={coll} onClose={() => setCreating(false)} />}
+      {pendingDrop !== null && (
+        <ConfirmDialog
+          title="删除索引"
+          message={`确认删除索引 ${pendingDrop}？`}
+          danger
+          confirmText="删除"
+          onConfirm={confirmDrop}
+          onClose={() => setPendingDrop(null)}
+        />
+      )}
     </div>
   )
 }

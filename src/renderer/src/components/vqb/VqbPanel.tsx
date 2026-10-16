@@ -6,11 +6,13 @@ import {
   Calendar,
   ChevronDown,
   ChevronUp,
+  Code2,
   GripVertical,
   Plus,
   Trash2,
   CornerDownRight,
-  Play
+  Play,
+  X
 } from 'lucide-react'
 import {
   ARRAY_ELEMENT_PLACEHOLDER,
@@ -26,9 +28,12 @@ import {
   operatorDescription,
   applicableOperator,
   isRangeOperator,
-  parseShellLiteral
+  parseShellLiteral,
+  dumps,
+  isPlainObject
 } from '@core'
 import { useAppStore } from '../../store/app-store'
+import { ConfirmDialog } from '../ConfirmDialog'
 
 const GROUP_OPS: GroupOp[] = ['AND', 'OR', 'NOR']
 const VALUE_PLACEHOLDER = 'null'
@@ -56,6 +61,201 @@ function operatorChoices(fieldType: string | null): Operator[] {
 
 /** 字段下拉渲染上限：schema 字段可能上千，原生 select 全量渲染会卡死 */
 const FIELD_LIST_MAX = 200
+
+/** 分段参数输入：skip/limit 数字框；proj/sort 支持从结果表格拖入字段名 */
+function SegmentInput({
+  label,
+  value,
+  onChange,
+  width,
+  numeric,
+  onDropField
+}: {
+  label: string
+  value: string
+  onChange(value: string): void
+  width: string
+  numeric?: boolean
+  /** 拖入字段时的处理（proj：加入/移除；sort：1 → -1 → 移除循环） */
+  onDropField?(field: string): void
+}): JSX.Element {
+  const [dropHover, setDropHover] = useState(false)
+  return (
+    <label className="flex shrink-0 items-center gap-1">
+      <span className="text-[10px] uppercase tracking-wide text-text-muted">{label}</span>
+      <input
+        value={value}
+        inputMode={numeric ? 'numeric' : undefined}
+        onChange={(event) => onChange(event.target.value)}
+        onDragOver={
+          onDropField
+            ? (event) => {
+                if (!event.dataTransfer.types.includes(VQB_FIELD_MIME)) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+                setDropHover(true)
+              }
+            : undefined
+        }
+        onDragLeave={() => setDropHover(false)}
+        onDrop={
+          onDropField
+            ? (event) => {
+                setDropHover(false)
+                const payload = event.dataTransfer.getData(VQB_FIELD_MIME)
+                if (payload === '') return
+                event.preventDefault()
+                event.stopPropagation()
+                try {
+                  const parsed = JSON.parse(payload) as { field: string }
+                  onDropField(parsed.field)
+                } catch {
+                  /* 非法载荷忽略 */
+                }
+              }
+            : undefined
+        }
+        title={
+          onDropField
+            ? '可从结果表格拖入字段名（再拖一次可切换/移除）'
+            : undefined
+        }
+        className={`mono h-6 rounded border bg-base px-1.5 text-[11px] text-text-primary outline-none transition-colors duration-fast placeholder:text-text-faint focus:border-accent-dim ${width} ${
+          dropHover ? 'border-accent bg-hover' : 'border-line'
+        }`}
+      />
+    </label>
+  )
+}
+
+/** 解析 proj/sort 文本（容错：空/非法返回空文档） */
+function parsePartDoc(text: string): Record<string, Value> {
+  if (text.trim() === '') return {}
+  try {
+    const parsed = parseShellLiteral(text)
+    return isPlainObject(parsed) ? { ...parsed } : {}
+  } catch {
+    return {}
+  }
+}
+
+/** chip 展示文本：proj 用 1/0，sort 用 ↑/↓；复杂表达式不可循环切换 */
+function chipLabel(kind: 'proj' | 'sort', field: string, value: Value): { text: string; cyclable: boolean } {
+  if (kind === 'sort') {
+    if (value === 1) return { text: `${field} ↑`, cyclable: true }
+    if (value === -1) return { text: `${field} ↓`, cyclable: true }
+    return { text: `${field}: ${dumps(value, 0)}`, cyclable: false }
+  }
+  if (value === 1) return { text: `${field} 1`, cyclable: true }
+  if (value === 0) return { text: `${field} 0`, cyclable: true }
+  return { text: `${field}: ${dumps(value, 0)}`, cyclable: false }
+}
+
+/**
+ * proj/sort 图形化编辑器：字段渲染为 chip（点击循环切换、× 移除、支持拖入字段），
+ * 原始文本输入按需展开作为辅助编辑。
+ */
+function PartEditor({
+  label,
+  kind,
+  text,
+  entries,
+  onRawChange,
+  onDropField,
+  onCycle,
+  onRemove
+}: {
+  label: string
+  kind: 'proj' | 'sort'
+  text: string
+  entries: [string, Value][]
+  onRawChange(value: string): void
+  onDropField(field: string): void
+  onCycle(field: string): void
+  onRemove(field: string): void
+}): JSX.Element {
+  const [dropHover, setDropHover] = useState(false)
+  const [rawOpen, setRawOpen] = useState(false)
+  return (
+    <div
+      onDragOver={(event) => {
+        if (!event.dataTransfer.types.includes(VQB_FIELD_MIME)) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'copy'
+        setDropHover(true)
+      }}
+      onDragLeave={() => setDropHover(false)}
+      onDrop={(event) => {
+        setDropHover(false)
+        const payload = event.dataTransfer.getData(VQB_FIELD_MIME)
+        if (payload === '') return
+        event.preventDefault()
+        event.stopPropagation()
+        try {
+          const parsed = JSON.parse(payload) as { field: string }
+          onDropField(parsed.field)
+        } catch {
+          /* 非法载荷忽略 */
+        }
+      }}
+      className={`flex min-w-0 flex-1 flex-wrap items-center gap-1 rounded border px-1 py-0.5 ${
+        dropHover ? 'border-accent bg-hover' : 'border-transparent'
+      }`}
+    >
+      <span className="text-[10px] uppercase tracking-wide text-text-muted">{label}</span>
+      {entries.map(([field, value]) => {
+        const info = chipLabel(kind, field, value)
+        return (
+          <span
+            key={field}
+            className="flex h-5 shrink-0 items-center gap-1 rounded border border-line bg-base pl-1.5 pr-0.5 text-[10px] text-text-primary"
+          >
+            <button
+              type="button"
+              title={info.cyclable ? '点击切换' : '复杂表达式：请展开原始文本编辑'}
+              onClick={() => {
+                if (info.cyclable) onCycle(field)
+              }}
+              className={`max-w-[160px] cursor-pointer truncate ${info.cyclable ? 'hover:text-accent' : 'cursor-default'}`}
+            >
+              {info.text}
+            </button>
+            <button
+              type="button"
+              title="移除"
+              onClick={() => onRemove(field)}
+              className="ml-0.5 cursor-pointer border-l border-line p-0.5 pl-1 text-text-faint transition-colors duration-fast hover:text-danger"
+            >
+              <X size={9} />
+            </button>
+          </span>
+        )
+      })}
+      {entries.length === 0 && !rawOpen && (
+        <span className="text-[10px] text-text-faint">拖入字段，或点击 </span>
+      )}
+      <div className="flex-1" />
+      <button
+        type="button"
+        title="切换原始文本编辑"
+        onClick={() => setRawOpen(!rawOpen)}
+        className={`shrink-0 cursor-pointer rounded p-0.5 transition-colors duration-fast ${
+          rawOpen ? 'text-accent' : 'text-text-faint hover:text-text-primary'
+        }`}
+      >
+        <Code2 size={10} />
+      </button>
+      {rawOpen && (
+        <input
+          value={text}
+          onChange={(event) => onRawChange(event.target.value)}
+          placeholder={kind === 'proj' ? '{ field: 1, other: 0 }' : '{ field: 1, other: -1 }'}
+          className="mono h-6 w-44 min-w-0 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
+        />
+      )}
+    </div>
+  )
+}
 
 /**
  * 可输入过滤的字段 combobox：过滤 + 上限渲染 + 支持手输任意字段名。
@@ -649,12 +849,81 @@ export function VqbPanel(): JSX.Element | null {
   const importFilterToVqb = useAppStore((s) => s.importFilterToVqb)
   const exportVqbToFilter = useAppStore((s) => s.exportVqbToFilter)
   const setVqbTree = useAppStore((s) => s.setVqbTree)
+  const patchActive = useAppStore((s) => s.patchActive)
   const vqbTree = activeTab?.vqbTree ?? null
   const vqbOpen = activeTab?.vqbOpen ?? false
   const schemaNames = useMemo(
     () => (activeTab?.schema !== null && activeTab?.schema !== undefined ? activeTab.schema.names() : []),
     [activeTab]
   )
+
+  const setPart = (part: 'projectionText' | 'sortText' | 'skip' | 'limit', value: string): void => {
+    if (activeTab === null) return
+    if (part === 'skip' || part === 'limit') {
+      const parsed = Number.parseInt(value, 10)
+      patchActive({ [part]: Number.isFinite(parsed) && parsed >= 0 ? parsed : 0 })
+      return
+    }
+    patchActive({ [part]: value })
+  }
+
+  /** 拖字段到 proj：没有则加入（{field: 1}）；已有保持不变（切换交给 chip 点击） */
+  const dropToProjection = (field: string): void => {
+    if (activeTab === null) return
+    const doc = parsePartDoc(activeTab.projectionText)
+    if (field in doc) return
+    doc[field] = 1
+    patchActive({ projectionText: dumps(doc, 0) })
+  }
+
+  /** 拖字段到 sort：没有则加入升序 {field: 1} */
+  const dropToSort = (field: string): void => {
+    if (activeTab === null) return
+    const doc = parsePartDoc(activeTab.sortText)
+    if (field in doc) return
+    doc[field] = 1
+    patchActive({ sortText: dumps(doc, 0) })
+  }
+
+  /** proj chip 点击：仅切换保留(1) ⇄ 排除(0)（移除只走 × 按钮，避免误删） */
+  const cycleProjection = (field: string): void => {
+    if (activeTab === null) return
+    const doc = parsePartDoc(activeTab.projectionText)
+    doc[field] = doc[field] === 1 ? 0 : 1
+    patchActive({ projectionText: dumps(doc, 0) })
+  }
+
+  const removeProjection = (field: string): void => {
+    if (activeTab === null) return
+    const doc = parsePartDoc(activeTab.projectionText)
+    delete doc[field]
+    patchActive({ projectionText: Object.keys(doc).length === 0 ? '' : dumps(doc, 0) })
+  }
+
+  /** sort chip 点击：仅切换升序 ⇄ 降序（移除只走 × 按钮，避免误删） */
+  const cycleSort = (field: string): void => {
+    if (activeTab === null) return
+    const doc = parsePartDoc(activeTab.sortText)
+    doc[field] = doc[field] === 1 ? -1 : 1
+    patchActive({ sortText: dumps(doc, 0) })
+  }
+
+  const removeSort = (field: string): void => {
+    if (activeTab === null) return
+    const doc = parsePartDoc(activeTab.sortText)
+    delete doc[field]
+    patchActive({ sortText: Object.keys(doc).length === 0 ? '' : dumps(doc, 0) })
+  }
+
+  const projEntries = useMemo<[string, Value][]>(
+    () => Object.entries(parsePartDoc(activeTab?.projectionText ?? '')),
+    [activeTab?.projectionText]
+  )
+  const sortEntries = useMemo<[string, Value][]>(
+    () => Object.entries(parsePartDoc(activeTab?.sortText ?? '')),
+    [activeTab?.sortText]
+  )
+  const [notice, setNotice] = useState<string | null>(null)
 
   // 首次打开时建一棵带空规则的树（副作用放 useEffect，不在渲染期写 store）
   useEffect(() => {
@@ -669,10 +938,11 @@ export function VqbPanel(): JSX.Element | null {
 
   const tree = vqbTree
   if (tree === null) return null
+  if (activeTab === null) return null
 
   return (
     <div className="flex h-full w-[45%] min-w-[360px] shrink-0 flex-col border-r border-line bg-panel">
-      <div className="flex h-7 shrink-0 items-center gap-2 px-2 pt-1">
+      <div className="flex h-8 shrink-0 items-center gap-2 px-2">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
           可视化查询构建
         </span>
@@ -680,7 +950,7 @@ export function VqbPanel(): JSX.Element | null {
         <button
           type="button"
           onClick={() => {
-            if (!importFilterToVqb()) window.alert('filter 不是合法查询文档，无法导入')
+            if (!importFilterToVqb()) setNotice('filter 不是合法查询文档，无法导入')
           }}
           className="cursor-pointer text-[10px] text-text-muted transition-colors duration-fast hover:text-text-primary"
         >
@@ -697,7 +967,41 @@ export function VqbPanel(): JSX.Element | null {
       <div className="min-h-0 flex-1 overflow-y-auto p-2 pt-1">
         <GroupBlock group={tree} parent={null} depth={0} schemaNames={schemaNames} />
       </div>
-      <div className="flex h-9 shrink-0 items-center justify-end gap-2 border-t border-line px-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-line px-2 py-1.5">
+        <PartEditor
+          label="proj"
+          kind="proj"
+          text={activeTab.projectionText}
+          entries={projEntries}
+          onRawChange={(value) => setPart('projectionText', value)}
+          onDropField={dropToProjection}
+          onCycle={cycleProjection}
+          onRemove={removeProjection}
+        />
+        <PartEditor
+          label="sort"
+          kind="sort"
+          text={activeTab.sortText}
+          entries={sortEntries}
+          onRawChange={(value) => setPart('sortText', value)}
+          onDropField={dropToSort}
+          onCycle={cycleSort}
+          onRemove={removeSort}
+        />
+        <SegmentInput
+          label="skip"
+          value={String(activeTab.skip)}
+          onChange={(value) => setPart('skip', value)}
+          width="w-16"
+          numeric
+        />
+        <SegmentInput
+          label="limit"
+          value={String(activeTab.limit)}
+          onChange={(value) => setPart('limit', value)}
+          width="w-16"
+          numeric
+        />
         <button
           type="button"
           disabled={activeTab?.running ?? false}
@@ -706,11 +1010,21 @@ export function VqbPanel(): JSX.Element | null {
             exportVqbToFilter()
             void useAppStore.getState().runTab(activeTab.id, { resetSkip: true })
           }}
-          className="flex h-6 cursor-pointer items-center gap-1 rounded bg-accent px-3 text-[10px] font-semibold text-[rgb(var(--c-on-accent))] transition-colors duration-fast hover:bg-accent-bright disabled:cursor-not-allowed disabled:opacity-50"
+          className="ml-auto flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded bg-accent px-3 text-[10px] font-semibold text-[rgb(var(--c-on-accent))] transition-colors duration-fast hover:bg-accent-bright disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Play size={11} /> 执行查询
         </button>
       </div>
+      {notice !== null && (
+        <ConfirmDialog
+          title="提示"
+          message={notice}
+          confirmText="知道了"
+          cancelText={null}
+          onConfirm={() => setNotice(null)}
+          onClose={() => setNotice(null)}
+        />
+      )}
     </div>
   )
 }

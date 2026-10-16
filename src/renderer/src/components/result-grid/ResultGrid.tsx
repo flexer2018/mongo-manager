@@ -5,6 +5,8 @@ import { Braces, Pencil, Plus, Table2, Trash2, X, Zap } from 'lucide-react'
 import { EJSON, Int32, Long } from 'bson'
 import { Value, isPlainObject } from '@core'
 import { useAppStore } from '../../store/app-store'
+import { backend } from '../../lib/api'
+import { ConfirmDialog } from '../ConfirmDialog'
 import { VQB_FIELD_MIME } from '../vqb/VqbPanel'
 import { PrettyEjson } from './PrettyJson'
 import { ShellJsonDocument, mongoshText } from './ShellJsonView'
@@ -301,14 +303,46 @@ export function ResultGrid(): JSX.Element {
 
   const columns = useMemo(() => collectColumns(docs), [docs])
 
+  const [pendingDelete, setPendingDelete] = useState<Value | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
   const deleteRow = (doc: Value): void => {
     const id = (doc as Record<string, unknown>)._id
     if (id === undefined) {
-      window.alert('该文档没有 _id，无法定位删除')
+      setNotice('该文档没有 _id，无法定位删除')
       return
     }
-    if (!window.confirm('确认删除该文档？此操作不可撤销。')) return
-    void useAppStore.getState().deleteDoc(EJSON.stringify(id))
+    setPendingDelete(doc)
+  }
+
+  /**
+   * 打开编辑器：编辑模式下按 _id 回取完整文档。
+   * 当前页文档可能被 projection 裁剪过，直接编辑保存（replaceOne 全量替换）
+   * 会丢失 projection 范围之外的字段，必须先取全量再编辑。
+   */
+  const openEditor = async (editMode: 'edit' | 'insert', doc: Value | null): Promise<void> => {
+    if (editMode === 'edit' && doc !== null && activeTab !== null) {
+      const id = (doc as Record<string, unknown>)._id
+      if (id !== undefined) {
+        try {
+          const result = await backend.find({
+            connId: activeTab.connId,
+            db: activeTab.db,
+            coll: activeTab.coll,
+            filter: EJSON.stringify({ _id: id }, { relaxed: false }),
+            skip: 0,
+            limit: 1
+          })
+          const full = result.docs
+            .map((text) => EJSON.parse(text, { relaxed: false }) as Value)
+            .find((item) => isPlainObject(item))
+          if (full !== undefined) doc = full
+        } catch (exc) {
+          console.error('回取完整文档失败，将使用当前行数据编辑:', exc)
+        }
+      }
+    }
+    setEditor({ mode: editMode, doc })
   }
   const rowVirtualizer = useVirtualizer({
     count: docs.length,
@@ -430,7 +464,7 @@ export function ResultGrid(): JSX.Element {
                           title="编辑文档"
                           onClick={(event) => {
                             event.stopPropagation()
-                            setEditor({ mode: 'edit', doc })
+                            void openEditor('edit', doc)
                           }}
                           className="cursor-pointer p-0.5 text-text-faint transition-colors duration-fast hover:text-accent"
                         >
@@ -475,7 +509,7 @@ export function ResultGrid(): JSX.Element {
           onClose={() => setDrawerIndex(null)}
           onEdit={(doc) => {
             setDrawerIndex(null)
-            setEditor({ mode: 'edit', doc })
+            void openEditor('edit', doc)
           }}
         />
       )}
@@ -484,6 +518,30 @@ export function ResultGrid(): JSX.Element {
           mode={editor.mode}
           doc={editor.doc}
           onClose={() => setEditor(null)}
+        />
+      )}
+      {pendingDelete !== null && (
+        <ConfirmDialog
+          title="删除文档"
+          message="确认删除该文档？此操作不可撤销。"
+          danger
+          confirmText="删除"
+          onConfirm={() => {
+            const id = (pendingDelete as Record<string, unknown>)._id
+            setPendingDelete(null)
+            void useAppStore.getState().deleteDoc(EJSON.stringify(id))
+          }}
+          onClose={() => setPendingDelete(null)}
+        />
+      )}
+      {notice !== null && (
+        <ConfirmDialog
+          title="提示"
+          message={notice}
+          confirmText="知道了"
+          cancelText={null}
+          onConfirm={() => setNotice(null)}
+          onClose={() => setNotice(null)}
         />
       )}
     </div>

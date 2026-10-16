@@ -21,6 +21,17 @@ export default function App(): JSX.Element {
     document.documentElement.classList.toggle('light', theme === 'light')
   }, [theme])
 
+  const navToggle = (
+    <button
+      type="button"
+      onClick={() => setNavOpen((open) => !open)}
+      title={navOpen ? '收起导航栏' : '展开导航栏'}
+      className="mr-0.5 flex size-6 shrink-0 cursor-pointer items-center justify-center rounded text-text-muted transition-colors duration-fast hover:bg-hover hover:text-text-primary"
+    >
+      {navOpen ? <PanelLeftClose size={13} /> : <PanelLeftOpen size={13} />}
+    </button>
+  )
+
   return (
     <div className="flex h-full flex-col bg-base">
       <Toolbar />
@@ -31,16 +42,7 @@ export default function App(): JSX.Element {
           </aside>
         ) : null}
         <main className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-7 shrink-0 items-center border-b border-line bg-panel px-1.5">
-            <button
-              type="button"
-              onClick={() => setNavOpen((open) => !open)}
-              className="cursor-pointer p-1 text-text-muted transition-colors duration-fast hover:text-text-primary"
-            >
-              {navOpen ? <PanelLeftClose size={13} /> : <PanelLeftOpen size={13} />}
-            </button>
-          </div>
-          <Workbench />
+          <Workbench navToggle={navToggle} />
         </main>
       </div>
       <StatusBar />

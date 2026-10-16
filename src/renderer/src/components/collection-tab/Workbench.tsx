@@ -1,18 +1,22 @@
 import { useMemo, useState } from 'react'
 import type { JSX } from 'react'
-import { Braces, Table2, X } from 'lucide-react'
+import { Braces, Table2, Wand2, X } from 'lucide-react'
+import { mongoFilterToSql, parseShellLiteral } from '@core'
+import type { OrderedDoc } from '@core'
 import { useAppStore } from '../../store/app-store'
 import { QueryBar } from '../query-bar/QueryBar'
 import { VqbPanel } from '../vqb/VqbPanel'
 import { ResultGrid } from '../result-grid/ResultGrid'
 import { QueryCodePanel } from '../query-code/QueryCodePanel'
 
-/** 集合工作区：多 tab 页签 + 左右查询区（VQB | 编辑器，35vh）+ 结果区（≥40vh） */
-export function Workbench(): JSX.Element {
+/** 集合工作区：多 tab 页签 + 左右查询区（VQB | 编辑器，35vh）+ 结果区（≥40vh）；navToggle 渲染在页签栏行首 */
+export function Workbench({ navToggle }: { navToggle?: JSX.Element }): JSX.Element {
   const tabs = useAppStore((s) => s.tabs)
   const activeTabId = useAppStore((s) => s.activeTabId)
   const setActiveTab = useAppStore((s) => s.setActiveTab)
   const closeTab = useAppStore((s) => s.closeTab)
+  const patchActive = useAppStore((s) => s.patchActive)
+  const toggleVqb = useAppStore((s) => s.toggleVqb)
   const connections = useAppStore((s) => s.connections)
   const [view, setView] = useState<'results' | 'code'>('results')
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null
@@ -34,8 +38,9 @@ export function Workbench(): JSX.Element {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 集合页签栏（多开） */}
+      {/* 集合页签栏（多开）：行首为导航栏开关，右侧为统计与模式切换 */}
       <div className="flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-line bg-panel px-1.5">
+        {navToggle}
         {tabs.map((tab) => (
           <button
             key={tab.id}
@@ -64,6 +69,60 @@ export function Workbench(): JSX.Element {
             />
           </button>
         ))}
+
+        {/* 页签栏右侧：运行统计 + JSON/SQL 切换 + 可视化构建（利用页签行的空余空间） */}
+        <div className="flex-1" />
+        <span className="shrink-0 text-[10px] text-text-muted">
+          {activeTab.running
+            ? '查询中…'
+            : `${activeTab.resultCount} 条 · ${activeTab.elapsedMs} ms`}
+          {activeTab.totalCount !== null && ` / 总 ${activeTab.totalCount}`}
+        </span>
+        <button
+          type="button"
+          title="切换 JSON / SQL 查询模式"
+          onClick={() => {
+            const toSql = activeTab.queryMode === 'json'
+            if (toSql && activeTab.sqlText.trim() === '') {
+              // 首次切到 SQL：用当前 filter 生成等价 SELECT（不可表达则留提示）
+              let doc: OrderedDoc = {}
+              try {
+                doc = parseShellLiteral(
+                  activeTab.filterText.trim() === '' ? '{}' : activeTab.filterText
+                ) as OrderedDoc
+              } catch {
+                doc = {}
+              }
+              const sql = mongoFilterToSql(doc, activeTab.coll)
+              patchActive({
+                queryMode: 'sql',
+                sqlText: sql ?? '-- 当前 filter 含 SQL 无法表达的查询形态\n-- 请直接编写 MySQL 风格 SELECT'
+              })
+              return
+            }
+            patchActive({ queryMode: toSql ? 'sql' : 'json' })
+          }}
+          className={`flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded border px-2 text-[10px] transition-colors duration-fast ${
+            activeTab.queryMode === 'sql'
+              ? 'border-accent-dim bg-accent-subtle text-accent'
+              : 'border-line bg-elevated text-text-secondary hover:text-text-primary'
+          }`}
+        >
+          <Braces size={11} />
+          {activeTab.queryMode === 'sql' ? 'SQL' : 'JSON'}
+        </button>
+        <button
+          type="button"
+          onClick={toggleVqb}
+          className={`flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded border px-2 text-[10px] transition-colors duration-fast ${
+            activeTab.vqbOpen
+              ? 'border-accent-dim bg-accent-subtle text-accent'
+              : 'border-line bg-elevated text-text-secondary hover:text-text-primary'
+          }`}
+        >
+          <Wand2 size={11} />
+          可视化构建
+        </button>
       </div>
 
       {/* 查询区：左 VQB / 右编辑器，占视口 35% */}

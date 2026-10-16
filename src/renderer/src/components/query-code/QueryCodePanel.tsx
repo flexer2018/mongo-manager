@@ -1,7 +1,14 @@
 import { useMemo, useState } from 'react'
 import type { JSX } from 'react'
 import { Check, Code2, Copy } from 'lucide-react'
-import { availableLanguages, generateFindCode, parseFindFilter, toBson, QueryGroup } from '@core'
+import {
+  availableLanguages,
+  generateFindCode,
+  parseFindFilter,
+  parseShellLiteral,
+  toBson,
+  QueryGroup
+} from '@core'
 import { useAppStore } from '../../store/app-store'
 
 /** 语言名 → 页签短标签 */
@@ -19,7 +26,8 @@ const LABELS: Record<string, string> = {
 function parseDoc(text: string): unknown {
   if (text.trim() === '') return undefined
   try {
-    return JSON.parse(text) as unknown
+    // shell 语法解析（兼容 dumps 输出的无引号键 / ISODate 等构造器），标准 JSON 也能解析
+    return parseShellLiteral(text)
   } catch {
     return undefined
   }
