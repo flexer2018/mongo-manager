@@ -229,6 +229,25 @@ export function registerMongoHandlers(): void {
     return true as const
   })
 
+  handle(
+    IPC.deleteByFilter,
+    async (
+      connId: string,
+      db: string,
+      coll: string,
+      filterText: string,
+      op: 'deleteOne' | 'deleteMany'
+    ) => {
+      const filter = parseEjson(filterText)
+      const collection = connections.client(connId).db(db).collection(coll)
+      const result =
+        op === 'deleteOne'
+          ? await collection.deleteOne(filter as Document)
+          : await collection.deleteMany(filter as Document)
+      return result.deletedCount
+    }
+  )
+
   // ---- 集合管理（二期）----
 
   handle(

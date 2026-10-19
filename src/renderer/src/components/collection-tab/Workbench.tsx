@@ -1,8 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { JSX } from 'react'
-import { Braces, Table2, Wand2, X } from 'lucide-react'
-import { mongoFilterToSql, parseShellLiteral } from '@core'
-import type { OrderedDoc } from '@core'
+import { Braces, Table2, Terminal, Wand2, X } from 'lucide-react'
 import { useAppStore } from '../../store/app-store'
 import { QueryBar } from '../query-bar/QueryBar'
 import { VqbPanel } from '../vqb/VqbPanel'
@@ -15,7 +13,6 @@ export function Workbench({ navToggle }: { navToggle?: JSX.Element }): JSX.Eleme
   const activeTabId = useAppStore((s) => s.activeTabId)
   const setActiveTab = useAppStore((s) => s.setActiveTab)
   const closeTab = useAppStore((s) => s.closeTab)
-  const patchActive = useAppStore((s) => s.patchActive)
   const toggleVqb = useAppStore((s) => s.toggleVqb)
   const connections = useAppStore((s) => s.connections)
   const [view, setView] = useState<'results' | 'code'>('results')
@@ -52,12 +49,22 @@ export function Workbench({ navToggle }: { navToggle?: JSX.Element }): JSX.Eleme
                 : 'text-text-muted hover:bg-hover hover:text-text-primary'
             }`}
           >
-            <span className="mono max-w-44 truncate">
-              {tab.db}.
-              <span className="font-semibold" style={{ color: connColors.get(tab.connId) }}>
-                {tab.coll}
+            {tab.kind === 'collection' ? (
+              <span className="mono max-w-44 truncate">
+                {tab.db}.
+                <span className="font-semibold" style={{ color: connColors.get(tab.connId) }}>
+                  {tab.coll}
+                </span>
               </span>
-            </span>
+            ) : (
+              <span className="flex max-w-44 items-center gap-1 truncate">
+                {tab.kind === 'sql' ? <Braces size={10} /> : <Terminal size={10} />}
+                <span style={{ color: connColors.get(tab.connId) }}>
+                  {tab.kind === 'sql' ? 'SQL 查询' : 'Shell 查询'}
+                </span>
+                <span className="truncate text-text-faint">{tab.db}</span>
+              </span>
+            )}
             {tab.running && <span className="size-1.5 animate-pulse rounded-full bg-warning" />}
             <X
               size={11}
@@ -70,7 +77,7 @@ export function Workbench({ navToggle }: { navToggle?: JSX.Element }): JSX.Eleme
           </button>
         ))}
 
-        {/* 页签栏右侧：运行统计 + JSON/SQL 切换 + 可视化构建（利用页签行的空余空间） */}
+        {/* 页签栏右侧：运行统计 + 可视化构建（模式切换在查询区三段 Tab） */}
         <div className="flex-1" />
         <span className="shrink-0 text-[10px] text-text-muted">
           {activeTab.running
@@ -78,39 +85,6 @@ export function Workbench({ navToggle }: { navToggle?: JSX.Element }): JSX.Eleme
             : `${activeTab.resultCount} 条 · ${activeTab.elapsedMs} ms`}
           {activeTab.totalCount !== null && ` / 总 ${activeTab.totalCount}`}
         </span>
-        <button
-          type="button"
-          title="切换 JSON / SQL 查询模式"
-          onClick={() => {
-            const toSql = activeTab.queryMode === 'json'
-            if (toSql && activeTab.sqlText.trim() === '') {
-              // 首次切到 SQL：用当前 filter 生成等价 SELECT（不可表达则留提示）
-              let doc: OrderedDoc = {}
-              try {
-                doc = parseShellLiteral(
-                  activeTab.filterText.trim() === '' ? '{}' : activeTab.filterText
-                ) as OrderedDoc
-              } catch {
-                doc = {}
-              }
-              const sql = mongoFilterToSql(doc, activeTab.coll)
-              patchActive({
-                queryMode: 'sql',
-                sqlText: sql ?? '-- 当前 filter 含 SQL 无法表达的查询形态\n-- 请直接编写 MySQL 风格 SELECT'
-              })
-              return
-            }
-            patchActive({ queryMode: toSql ? 'sql' : 'json' })
-          }}
-          className={`flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded border px-2 text-[10px] transition-colors duration-fast ${
-            activeTab.queryMode === 'sql'
-              ? 'border-accent-dim bg-accent-subtle text-accent'
-              : 'border-line bg-elevated text-text-secondary hover:text-text-primary'
-          }`}
-        >
-          <Braces size={11} />
-          {activeTab.queryMode === 'sql' ? 'SQL' : 'JSON'}
-        </button>
         <button
           type="button"
           onClick={toggleVqb}
@@ -125,9 +99,9 @@ export function Workbench({ navToggle }: { navToggle?: JSX.Element }): JSX.Eleme
         </button>
       </div>
 
-      {/* 查询区：左 VQB / 右编辑器，占视口 35% */}
+      {/* 查询区：左 VQB / 右编辑器，占视口 35%；独立查询编辑器不显示 VQB */}
       <div className="flex h-[35vh] min-h-[220px] shrink-0 border-b border-line">
-        <VqbPanel />
+        {activeTab.kind === 'collection' && <VqbPanel />}
         <QueryBar />
       </div>
 

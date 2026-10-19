@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { EJSON, ObjectId } from 'bson'
+import { EJSON, Int32, Long, ObjectId } from 'bson'
 import type { JSX } from 'react'
 import {
   Calendar,
@@ -424,11 +424,12 @@ function RuleRow({
     commit()
   }
 
-  const fieldType = useMemo(() => {
-    const tab = useAppStore.getState().tabs.find((item) => item.id === useAppStore.getState().activeTabId)
+  // 订阅 schema：采样完成后字段类型即可用于值解析（字符串字段的数字文本不转数字）
+  const fieldType = useAppStore((s) => {
+    const tab = s.tabs.find((item) => item.id === s.activeTabId)
     const schema = tab?.schema ?? null
     return schema !== null ? schema.typeOf(rule.field) : null
-  }, [rule.field])
+  })
   const choices = operatorChoices(fieldType)
   const isCustom = rule.operator === 'CUSTOM'
   const isTextual = rule.operator === 'TEXT_INDEX_SEARCH'
@@ -481,7 +482,7 @@ function RuleRow({
       {!isTextual && (
         <input
           value={valueToText(rule.value)}
-          onChange={(event) => update({ value: textToValue(event.target.value) })}
+          onChange={(event) => update({ value: textToValue(event.target.value, fieldType) })}
           placeholder={VALUE_PLACEHOLDER}
           className="mono h-6 min-w-0 flex-1 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
         />
@@ -505,7 +506,7 @@ function RuleRow({
       {isRange && !isTextual && (
         <input
           value={valueToText(rule.secondValue)}
-          onChange={(event) => update({ secondValue: textToValue(event.target.value) })}
+          onChange={(event) => update({ secondValue: textToValue(event.target.value, fieldType) })}
           placeholder={VALUE_PLACEHOLDER}
           className="mono h-6 min-w-0 flex-1 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
         />
@@ -621,9 +622,16 @@ function pickerTextToDate(text: string): Date | null {
 const SHELL_CONSTRUCTOR_RE =
   /^(?:ISODate|Date|ObjectId|NumberLong|NumberInt|NumberDecimal|UUID|BinData|Timestamp|MinKey|MaxKey)\s*\(\s*['"0-9tfn+\-.[]/i
 
-/** 白名单值解析：数字/布尔/null/JSON 数组/shell 构造器（ISODate/ObjectId…）；其余按字符串 */
-function textToValue(text: string): Value {
+/**
+ * 白名单值解析：引号字符串 / shell 构造器 / 布尔 / null / 数字 / JSON 数组对象。
+ * 关键：按 schema 字段类型决定数字文本的归属——字符串字段输入 "20260904"（不带引号）
+ * 也必须保持字符串，否则会把文本主键当成数字导致查询不到数据。
+ */
+function textToValue(text: string, fieldType: string | null = null): Value {
   const trimmed = text.trim()
+  // 显式引号：强制字符串（允许字符串形态的数字，如 "20260904"）
+  const quoted = /^(['"])([\s\S]*)\1$/.exec(trimmed)
+  if (quoted !== null) return quoted[2]
   if (SHELL_CONSTRUCTOR_RE.test(trimmed)) {
     try {
       return parseShellLiteral(trimmed) as Value
@@ -634,7 +642,15 @@ function textToValue(text: string): Value {
   if (trimmed === '' || trimmed === 'null') return null
   if (trimmed === 'true') return true
   if (trimmed === 'false') return false
-  if (/^-?\d+$/.test(trimmed)) return Number.parseInt(trimmed, 10)
+  // schema 已知为字符串字段：文本原样保留，不做任何数字转换
+  if (fieldType === 'STRING') return trimmed
+  if (/^-?\d+$/.test(trimmed)) {
+    const value = Number.parseInt(trimmed, 10)
+    if (Number.isSafeInteger(value) && value >= -2147483648 && value <= 2147483647) {
+      return new Int32(value)
+    }
+    return Long.fromString(trimmed)
+  }
   if (/^-?\d*\.\d+$/.test(trimmed)) return Number.parseFloat(trimmed)
   if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
     try {

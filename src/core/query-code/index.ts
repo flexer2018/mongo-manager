@@ -1,20 +1,19 @@
 import { CodeGenerationError } from '../value-model'
-import { QuerySpec } from './code-writer'
+import { CodeWriter, QuerySpec } from './code-writer'
+import { ShellLiteralRenderer, quoteText } from './renderers'
 // import { CSharpGenerator, Java2Generator, Java3Generator } from './generators-csharp-java'
 import { JavaScriptGenerator, ShellGenerator } from './generators-shell-js'
 import {  PythonGenerator } from './generators-scripting'
 
 export { CodeWriter, QuerySpec } from './code-writer'
+export { CodeGenerator, CREDIT_LINE } from './generator-base'
 export {
-  CodeGenerator,
-  CREDIT_LINE,
-  applyTemplate
-} from './generator-base'
-export {
+  ConfigurableJsonRenderer,
   JsonLiteralRenderer,
   LiteralRenderer,
   PythonLiteralRenderer,
   ShellLiteralRenderer,
+  applyTemplate,
   formatDatetime,
   indentBlock,
   quoteText
@@ -32,15 +31,9 @@ export { PhpGenerator, RubyGenerator } from './generators-scripting'
 
 /** 按 Java 侧 N8Kp 静态块的注册顺序 */
 export const GENERATORS: { name: string; create: () => { generate(spec: QuerySpec): string } }[] = [
-  { name: ShellGenerator.name, create: () => new ShellGenerator() },
-{ name: PythonGenerator.name, create: () => new PythonGenerator() },
-  { name: JavaScriptGenerator.name, create: () => new JavaScriptGenerator() },
-//   { name: CSharpGenerator.name, create: () => new CSharpGenerator() },
-//   { name: Java2Generator.name, create: () => new Java2Generator() },
-//   { name: Java3Generator.name, create: () => new Java3Generator() },
-
-//   { name: PhpGenerator.name, create: () => new PhpGenerator() },
-//   { name: RubyGenerator.name, create: () => new RubyGenerator() }
+  { name: new ShellGenerator().name, create: () => new ShellGenerator() },
+  { name: new PythonGenerator().name, create: () => new PythonGenerator() },
+  { name: new JavaScriptGenerator().name, create: () => new JavaScriptGenerator() }
 ]
 
 /** 返回全部可用语言名 */
@@ -96,4 +89,56 @@ export function generateFindCode(
     options.hint ?? null
   )
   return generateCode(spec, options.language ?? 'Python')
+}
+
+/** mongosh 命令的操作类型（Query Code 面板的命令切换） */
+export type ShellOp = 'find' | 'deleteOne' | 'deleteMany' | 'countDocuments'
+
+/** 生成完整形态的 mongosh 单条命令：db.getCollection("coll").<op>({...}) */
+export function generateShellCommand(
+  database: string,
+  collection: string,
+  op: ShellOp,
+  query: unknown,
+  options: { projection?: unknown; sort?: unknown; skip?: number; limit?: number } = {}
+): string {
+  const writer = new CodeWriter()
+  const renderer = new ShellLiteralRenderer()
+  writer.np(`db = db.getSiblingDB(${quoteText(database)});`)
+  const coll = `db.getCollection(${quoteText(collection)})`
+  const filter = renderer.render(query)
+  if (op === 'find') {
+    const projection =
+      options.projection !== null &&
+      options.projection !== undefined &&
+      typeof options.projection === 'object' &&
+      Object.keys(options.projection as object).length > 0
+        ? renderer.render(options.projection)
+        : null
+    writer.no(`${coll}.find(`)
+    if (projection !== null) {
+      writer.no(filter)
+      writer.no(', ')
+      writer.no(projection)
+    } else {
+      writer.no(filter)
+    }
+    writer.no(')')
+    if (
+      options.sort !== null &&
+      options.sort !== undefined &&
+      typeof options.sort === 'object' &&
+      Object.keys(options.sort as object).length > 0
+    ) {
+      writer.no(`.sort(${renderer.render(options.sort, true)})`)
+    }
+    if ((options.skip ?? 0) > 0) writer.no(`.skip(${options.skip})`)
+    if ((options.limit ?? 0) > 0) writer.no(`.limit(${options.limit})`)
+    writer.np(';')
+  } else {
+    writer.no(`${coll}.${op}(`)
+    writer.no(filter)
+    writer.np(');')
+  }
+  return writer.aKq()
 }

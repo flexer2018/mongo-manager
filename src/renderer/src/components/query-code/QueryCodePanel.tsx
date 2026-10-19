@@ -4,24 +4,34 @@ import { Check, Code2, Copy } from 'lucide-react'
 import {
   availableLanguages,
   generateFindCode,
+  generateShellCommand,
   parseFindFilter,
   parseShellLiteral,
   toBson,
-  QueryGroup
+  QueryGroup,
+  ShellOp
 } from '@core'
 import { useAppStore } from '../../store/app-store'
 
 /** 语言名 → 页签短标签 */
 const LABELS: Record<string, string> = {
-  Shell: 'Shell',
-  JavaScript: 'Node.js',
-  CSharp: 'C#',
-  'Java 2': 'Java (legacy)',
-  'Java 3': 'Java (new)',
+  'MongoDB Shell': 'Shell',
+  'JavaScript (Node.js)': 'Node.js',
   Python: 'Python',
-  Php: 'PHP',
-  Ruby: 'Ruby'
+  PHP: 'PHP',
+  Ruby: 'Ruby',
+  'C#': 'C#',
+  'Java (2.x driver API)': 'Java (legacy)',
+  'Java (3.x driver API)': 'Java (new)'
 }
+
+/** mongosh 命令操作类型 */
+const OPS: { op: ShellOp; label: string; title: string }[] = [
+  { op: 'find', label: 'find', title: '查询（支持 projection / sort / skip / limit，按所选语言生成）' },
+  { op: 'deleteOne', label: 'deleteOne', title: '删除一条匹配文档（mongosh）' },
+  { op: 'deleteMany', label: 'deleteMany', title: '删除全部匹配文档（mongosh）' },
+  { op: 'countDocuments', label: 'countDocuments', title: '统计匹配文档数（mongosh）' }
+]
 
 function parseDoc(text: string): unknown {
   if (text.trim() === '') return undefined
@@ -43,6 +53,7 @@ export function QueryCodePanel(): JSX.Element | null {
   const skip = activeTab?.skip ?? 0
   const limit = activeTab?.limit ?? 100
   const [selected, setSelected] = useState(availableLanguages()[0])
+  const [op, setOp] = useState<ShellOp>('find')
   const [copied, setCopied] = useState(false)
 
   // 优先用 VQB 树；否则从 filter 文本反解析（失败则不生成）
@@ -57,8 +68,15 @@ export function QueryCodePanel(): JSX.Element | null {
 
   const code = useMemo(() => {
     if (activeTab === null) return '// 打开一个集合后自动生成'
+    if (activeTab.kind !== 'collection') {
+      return '// 独立 SQL / Shell 编辑器不生成驱动代码\n// 在集合页签的查询区切换查看'
+    }
     if (tree === null) return '// filter 不是合法查询文档，无法生成'
     try {
+      if (op !== 'find') {
+        // 非查询操作：完整形态 mongosh 命令（deleteMany 等不带查询选项）
+        return generateShellCommand(activeTab.db, activeTab.coll, op, toBson(tree))
+      }
       return generateFindCode(activeTab.db, activeTab.coll, toBson(tree), {
         language: selected,
         projection: parseDoc(projectionText),
@@ -69,7 +87,7 @@ export function QueryCodePanel(): JSX.Element | null {
     } catch (exc) {
       return `// 生成失败: ${exc instanceof Error ? exc.message : String(exc)}`
     }
-  }, [tree, activeTab, selected, projectionText, sortText, skip, limit])
+  }, [tree, activeTab, selected, op, projectionText, sortText, skip, limit])
 
   const copy = (): void => {
     void navigator.clipboard.writeText(code).then(() => {
@@ -82,20 +100,40 @@ export function QueryCodePanel(): JSX.Element | null {
     <div className="flex min-h-0 flex-1 flex-col bg-base">
       <div className="flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-line bg-panel px-2">
         <Code2 size={11} className="mr-1 shrink-0 text-text-muted" />
-        {availableLanguages().map((language) => (
+        {OPS.map(({ op: value, label, title }) => (
           <button
-            key={language}
+            key={value}
             type="button"
-            onClick={() => setSelected(language)}
-            className={`h-6 shrink-0 cursor-pointer rounded px-2 text-[10px] transition-colors duration-fast ${
-              selected === language
+            title={title}
+            onClick={() => setOp(value)}
+            className={`mono h-6 shrink-0 cursor-pointer rounded px-2 text-[10px] transition-colors duration-fast ${
+              op === value
                 ? 'bg-active text-accent'
                 : 'text-text-muted hover:bg-hover hover:text-text-primary'
             }`}
           >
-            {LABELS[language] ?? language}
+            {label}
           </button>
         ))}
+        <span className="mx-1.5 h-3.5 w-px shrink-0 bg-line" />
+        {op === 'find' &&
+          availableLanguages().map((language) => (
+            <button
+              key={language}
+              type="button"
+              onClick={() => setSelected(language)}
+              className={`h-6 shrink-0 cursor-pointer rounded px-2 text-[10px] transition-colors duration-fast ${
+                selected === language
+                  ? 'bg-active text-accent'
+                  : 'text-text-muted hover:bg-hover hover:text-text-primary'
+              }`}
+            >
+              {LABELS[language] ?? language}
+            </button>
+          ))}
+        {op !== 'find' && (
+          <span className="text-[10px] text-text-faint">mongosh 命令（可直接粘贴执行）</span>
+        )}
         <div className="flex-1" />
         <button
           type="button"

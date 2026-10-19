@@ -158,7 +158,7 @@ const TOKEN_RE = new RegExp(
     '(?<string>"(?:\\\\[\\s\\S]|[^"\\\\])*"|\'(?:\\\\[\\s\\S]|[^\'\\\\])*\')',
     '(?<number>-?(?:0[xX][0-9a-fA-F]+|\\d+\\.?\\d*(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?)n?)',
     '(?<ident>[A-Za-z_$][A-Za-z0-9_$]*)',
-    '(?<punct>[{}\\[\\](),:])'
+    '(?<punct>[{}\\[\\](),:.;=])'
   ].join('|'),
   'y'
 )
@@ -434,4 +434,178 @@ export function stripFindShell(source: string): string {
 export function parseShellLiteral(source: string): Value {
   if (!source || !source.trim()) throw new ShellLiteralError('片段为空')
   return new LiteralParser(tokenize(stripFindShell(source))).parse()
+}
+
+// --- 完整 mongosh 命令解析（Shell 查询模式编辑框） -----------------------------
+
+export type ShellCommandOp = 'find' | 'deleteOne' | 'deleteMany' | 'countDocuments'
+
+export interface ShellCommandParts {
+  op: ShellCommandOp
+  /** 命令前缀 db = db.getSiblingDB("x") 指定的库；未指定为 null */
+  db: string | null
+  coll: string
+  filter: Value
+  /** 仅 find 第二参数 */
+  projection: Value | null
+  sort: Value | null
+  skip: number | null
+  limit: number | null
+}
+
+const COMMAND_OPS: Record<string, ShellCommandOp> = {
+  find: 'find',
+  findone: 'find',
+  deleteone: 'deleteOne',
+  deletemany: 'deleteMany',
+  countdocuments: 'countDocuments'
+}
+
+/** db = db.getSiblingDB("x"); 前缀（generateShellCommand 产物），可剥离 */
+const SIBLING_DB_RE =
+  /^\s*db\s*=\s*db\s*\.\s*getSiblingDB\s*\(\s*(?<q>["'])(?<name>[^"']+)\k<q>\s*\)\s*;?\s*/
+
+/**
+ * 从游标处切出一个完整值（对象 / 数组 / 构造器调用 / 标量）的记号片段。
+ * 括号深度回到 0 且下一记号是 ',' 或 ')'（或结束）即为本值边界。
+ */
+function sliceValueTokens(tokens: Token[], from: number): { slice: Token[]; end: number } {
+  let depth = 0
+  let i = from
+  for (;;) {
+    const token = tokens[i]
+    if (token === undefined) throw new ShellLiteralError('表达式意外结束')
+    i += 1
+    if (token.text === '{' || token.text === '[' || token.text === '(') depth += 1
+    else if (token.text === '}' || token.text === ']' || token.text === ')') depth -= 1
+    const nxt = tokens[i]
+    if (depth <= 0 && (nxt === undefined || nxt.text === ',' || nxt.text === ')')) {
+      if (depth < 0) throw new ShellLiteralError(`多余的 ${JSON.stringify(token.text)}`)
+      return { slice: tokens.slice(from, i), end: i }
+    }
+  }
+}
+
+/**
+ * 解析完整 mongosh 命令：
+ *   db.getCollection("c").find({...}, {...}).sort({...}).skip(n).limit(n)
+ *   db.getCollection("c").deleteMany({...}) / deleteOne / countDocuments
+ * 也接受 db.c.find(...) 与 db["c"].find(...) 形态；findOne 等价 find。
+ */
+export function parseShellCommand(source: string): ShellCommandParts {
+  const sibling = SIBLING_DB_RE.exec(source.trim())
+  const db = sibling?.groups?.name ?? null
+  const tokens = tokenize(
+    source
+      .trim()
+      .replace(SIBLING_DB_RE, '')
+      .replace(/[;\s]+$/, '')
+  )
+  let pos = 0
+  const peek = (): Token | null => (pos < tokens.length ? tokens[pos] : null)
+  const nextT = (): Token => {
+    const token = peek()
+    if (token === null) throw new ShellLiteralError('表达式意外结束')
+    pos += 1
+    return token
+  }
+  const expectT = (text: string): void => {
+    const token = nextT()
+    if (token.text !== text) {
+      throw new ShellLiteralError(
+        `期望 ${JSON.stringify(text)}，实际得到 ${JSON.stringify(token.text)}`
+      )
+    }
+  }
+
+  expectT('db')
+  // db.coll / db["coll"] / db.getCollection("coll")：db 后的点可省略
+  if ((peek()?.text ?? '') === '.') nextT()
+  let coll: string
+  const head = nextT()
+  if (head.text === 'getCollection') {
+    expectT('(')
+    const str = nextT()
+    if (str.kind !== 'string') throw new ShellLiteralError('getCollection() 需要字符串集合名')
+    coll = decodeJsString(str.text)
+    expectT(')')
+  } else if (head.kind === 'ident') {
+    coll = head.text
+  } else if (head.kind === 'string') {
+    coll = decodeJsString(head.text)
+  } else if (head.text === '[') {
+    const str = nextT()
+    if (str.kind !== 'string') throw new ShellLiteralError('db["coll"] 需要字符串集合名')
+    coll = decodeJsString(str.text)
+    expectT(']')
+  } else {
+    throw new ShellLiteralError('无法识别的集合访问形态')
+  }
+
+  expectT('.')
+  const opToken = nextT()
+  const opKey = opToken.kind === 'ident' ? opToken.text.toLowerCase() : ''
+  const op = COMMAND_OPS[opKey]
+  if (op === undefined) {
+    throw new ShellLiteralError(
+      `不支持的命令 .${opToken.text}()；支持 find / findOne / deleteOne / deleteMany / countDocuments`
+    )
+  }
+  expectT('(')
+
+  const args: Value[] = []
+  if ((peek()?.text ?? ')') !== ')') {
+    for (;;) {
+      const { slice, end } = sliceValueTokens(tokens, pos)
+      pos = end
+      args.push(new LiteralParser(slice).parse())
+      const sep = nextT()
+      if (sep.text === ')') break
+      if (sep.text !== ',') {
+        throw new ShellLiteralError(
+          `参数列表里期望 ',' 或 ')'，得到 ${JSON.stringify(sep.text)}`
+        )
+      }
+    }
+  } else {
+    nextT()
+  }
+
+  // find 的链式后缀：.sort({...}) / .skip(n) / .limit(n)；.toArray() 等无参链忽略
+  let sort: Value | null = null
+  let skip: number | null = null
+  let limit: number | null = null
+  while (peek() !== null) {
+    expectT('.')
+    const name = nextT().text.toLowerCase()
+    expectT('(')
+    if ((peek()?.text ?? ')') === ')') {
+      nextT()
+      continue
+    }
+    const { slice, end } = sliceValueTokens(tokens, pos)
+    pos = end
+    const value = new LiteralParser(slice).parse()
+    expectT(')')
+    if (name === 'sort') sort = value
+    else if (name === 'skip') skip = toInt(value)
+    else if (name === 'limit') limit = toInt(value)
+  }
+
+  const maxArgs = op === 'find' ? 2 : 1
+  if (args.length > maxArgs) {
+    throw new ShellLiteralError(
+      `${op}() 最多接受 ${maxArgs} 个参数，实际 ${args.length} 个`
+    )
+  }
+  return {
+    op,
+    db,
+    coll,
+    filter: args[0] ?? {},
+    projection: op === 'find' ? (args[1] ?? null) : null,
+    sort,
+    skip,
+    limit
+  }
 }

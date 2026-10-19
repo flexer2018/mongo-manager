@@ -1,48 +1,9 @@
 import { CodeWriter, QuerySpec } from './code-writer'
-import { JsonLiteralRenderer, LiteralRenderer } from './renderers'
+import { LiteralRenderer } from './renderers'
 import { CodeGenerationError } from '../value-model'
 
 /** 生成代码页签尾注 */
 export const CREDIT_LINE = ' Created with Mongo Manager - free & open-source MongoDB GUI'
-
-/** 模板占位替换，等价 Python str.format 的 {{ }} 转义语义 */
-export function applyTemplate(
-  tpl: string,
-  params: Record<string, string | number>
-): string {
-  let out = ''
-  let i = 0
-  while (i < tpl.length) {
-    const c = tpl[i]
-    if (c === '{') {
-      if (tpl[i + 1] === '{') {
-        out += '{'
-        i += 2
-        continue
-      }
-      const close = tpl.indexOf('}', i)
-      if (close > i) {
-        const key = tpl.slice(i + 1, close)
-        if (key in params) {
-          out += String(params[key])
-          i = close + 1
-          continue
-        }
-      }
-      out += c
-      i += 1
-      continue
-    }
-    if (c === '}' && tpl[i + 1] === '}') {
-      out += '}'
-      i += 2
-      continue
-    }
-    out += c
-    i += 1
-  }
-  return out
-}
 
 export abstract class CodeGenerator {
   /** 语言显示名 */
@@ -88,12 +49,5 @@ export abstract class CodeGenerator {
 
   protected notImplemented(value: never): never {
     throw new CodeGenerationError(`未支持的字面量: ${String(value)}`)
-  }
-}
-
-/** 供 JsonLiteralRenderer 子类定制模板的便捷基类 */
-export abstract class ConfigurableJsonRenderer extends JsonLiteralRenderer {
-  protected t(tpl: string, params: Record<string, string | number>): string {
-    return applyTemplate(tpl, params)
   }
 }

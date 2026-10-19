@@ -44,7 +44,13 @@ export function StatusBar(): JSX.Element {
           <Database size={10} className="shrink-0 text-text-faint" />
           <span className="mono truncate">
             {activeTab.db} <span className="text-text-faint">›</span>{' '}
-            <span className="text-accent-dim">{activeTab.coll}</span>
+            <span className="text-accent-dim">
+              {activeTab.kind === 'collection'
+                ? activeTab.coll
+                : activeTab.kind === 'sql'
+                  ? 'SQL 查询'
+                  : 'Shell 查询'}
+            </span>
           </span>
         </span>
       ) : (

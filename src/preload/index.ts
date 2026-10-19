@@ -35,6 +35,8 @@ const api: MongoApi = {
   replaceOne: (target: DocTarget, doc) =>
     ipcRenderer.invoke(IPC.replaceOne, target, doc),
   deleteOne: (target: DocTarget) => ipcRenderer.invoke(IPC.deleteOne, target),
+  deleteByFilter: (connId, db, coll, filter, op) =>
+    ipcRenderer.invoke(IPC.deleteByFilter, connId, db, coll, filter, op),
 
   // ---- 集合管理（二期）----
   createCollection: (connId, db, name, opts?: CreateCollectionOptions) =>

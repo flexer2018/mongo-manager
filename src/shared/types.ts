@@ -124,6 +124,14 @@ export interface MongoApi {
   replaceOne(target: DocTarget, doc: string): Promise<IpcResult<string>>
   /** 按 _id 删除单条文档 */
   deleteOne(target: DocTarget): Promise<IpcResult<true>>
+  /** 按 filter 删除文档（Shell 模式 deleteOne / deleteMany 命令），返回删除条数 */
+  deleteByFilter(
+    connId: string,
+    db: string,
+    coll: string,
+    filter: string,
+    op: 'deleteOne' | 'deleteMany'
+  ): Promise<IpcResult<number>>
 
   // ---- 集合管理（二期）----
   /** 创建集合；opts 支持 timeField（时间序列）/clustered/capped */
@@ -154,6 +162,7 @@ export const IPC = {
   insertOne: 'docs:insertOne',
   replaceOne: 'docs:replaceOne',
   deleteOne: 'docs:deleteOne',
+  deleteByFilter: 'docs:deleteByFilter',
 
   createCollection: 'coll:create',
   dropCollection: 'coll:drop',

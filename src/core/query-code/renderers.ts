@@ -13,7 +13,45 @@ import {
 } from 'bson'
 import { isPlainObject, OrderedDoc, pythonFloatRepr, Value } from '../value-model'
 import { toShellLiteral } from '../values'
-import { applyTemplate } from './generator-base'
+
+/** 模板占位替换，等价 Python str.format 的 {{ }} 转义语义 */
+export function applyTemplate(
+  tpl: string,
+  params: Record<string, string | number>
+): string {
+  let out = ''
+  let i = 0
+  while (i < tpl.length) {
+    const c = tpl[i]
+    if (c === '{') {
+      if (tpl[i + 1] === '{') {
+        out += '{'
+        i += 2
+        continue
+      }
+      const close = tpl.indexOf('}', i)
+      if (close > i) {
+        const key = tpl.slice(i + 1, close)
+        if (key in params) {
+          out += String(params[key])
+          i = close + 1
+          continue
+        }
+      }
+      out += c
+      i += 1
+      continue
+    }
+    if (c === '}' && tpl[i + 1] === '}') {
+      out += '}'
+      i += 2
+      continue
+    }
+    out += c
+    i += 1
+  }
+  return out
+}
 
 /** 通用字符串转义（对应各语言 ny()/nu()） */
 export function quoteText(text: string, quote = '"'): string {
@@ -241,6 +279,13 @@ export abstract class JsonLiteralRenderer extends LiteralRenderer {
       return '[\n' + indentBlock(inner, 4) + '\n]'
     }
     return quoteText(String(value), this.quote)
+  }
+}
+
+/** 供 JsonLiteralRenderer 子类定制模板的便捷基类 */
+export abstract class ConfigurableJsonRenderer extends JsonLiteralRenderer {
+  protected t(tpl: string, params: Record<string, string | number>): string {
+    return applyTemplate(tpl, params)
   }
 }
 

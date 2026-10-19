@@ -51,6 +51,13 @@ export const backend = {
   replaceOne: (target: DocTarget, doc: string): Promise<string> =>
     unwrap(api.replaceOne(target, doc)),
   deleteOne: (target: DocTarget): Promise<true> => unwrap(api.deleteOne(target)),
+  deleteByFilter: (
+    connId: string,
+    db: string,
+    coll: string,
+    filter: string,
+    op: 'deleteOne' | 'deleteMany'
+  ): Promise<number> => unwrap(api.deleteByFilter(connId, db, coll, filter, op)),
 
   // ---- 集合管理（二期）----
   createCollection: (

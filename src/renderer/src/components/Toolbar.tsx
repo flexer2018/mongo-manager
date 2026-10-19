@@ -1,6 +1,17 @@
 import { useState } from 'react'
 import type { JSX } from 'react'
-import { ChevronDown, Database, Loader2, Moon, Plug, PlugZap, Settings, Sun } from 'lucide-react'
+import {
+  Braces,
+  ChevronDown,
+  Database,
+  Loader2,
+  Moon,
+  Plug,
+  PlugZap,
+  Settings,
+  Sun,
+  Terminal
+} from 'lucide-react'
 import { useAppStore } from '../store/app-store'
 import { ConnectDialog } from './ConnectDialog'
 
@@ -12,6 +23,7 @@ export function Toolbar(): JSX.Element {
   const saved = useAppStore((s) => s.saved)
   const connect = useAppStore((s) => s.connect)
   const disconnect = useAppStore((s) => s.disconnect)
+  const openQueryEditor = useAppStore((s) => s.openQueryEditor)
   const theme = useAppStore((s) => s.theme)
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -98,8 +110,38 @@ export function Toolbar(): JSX.Element {
         )}
       </div>
 
-      <div className="flex-1" />
+      
 
+      {/* 独立查询编辑器：与集合页签同级的 SQL / mongosh 编辑框 */}
+      <button
+        type="button"
+        disabled={!connected}
+        title="新增 SQL 查询编辑器页签"
+        onClick={() => openQueryEditor('sql')}
+        className={`flex h-7 items-center gap-1.5 rounded border px-2.5 text-2xs transition-colors duration-fast ${
+          connected
+            ? 'cursor-pointer border-line bg-elevated text-text-secondary hover:border-accent-dim hover:text-accent'
+            : 'cursor-not-allowed border-line bg-elevated text-text-faint'
+        }`}
+      >
+        <Braces size={12} />
+        SQL 查询
+      </button>
+      <button
+        type="button"
+        disabled={!connected}
+        title="新增 mongosh 查询编辑器页签"
+        onClick={() => openQueryEditor('shell')}
+        className={`flex h-7 items-center gap-1.5 rounded border px-2.5 text-2xs transition-colors duration-fast ${
+          connected
+            ? 'cursor-pointer border-line bg-elevated text-text-secondary hover:border-accent-dim hover:text-accent'
+            : 'cursor-not-allowed border-line bg-elevated text-text-faint'
+        }`}
+      >
+        <Terminal size={12} />
+        Shell 查询
+      </button>
+<div className="flex-1" />
       <button
         type="button"
         onClick={toggleTheme}

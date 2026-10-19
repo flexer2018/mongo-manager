@@ -11,13 +11,18 @@ import {
   Schema,
   Value,
   dumps,
+  generateShellCommand,
   inferSchema,
+  mongoFilterToSql,
   parseFindFilter,
+  parseShellCommand,
   parseShellLiteral,
   toBson,
+  toShellLiteral,
   QueryGroup,
   sqlToMongo
 } from '@core'
+import type { OrderedDoc, ShellCommandParts } from '@core'
 import type {
   CreateCollectionOptions,
   DatabaseSummary,
@@ -29,13 +34,17 @@ import { backend } from '../lib/api'
 /** 一个集合页签的全部独立状态 */
 export interface WorkTab {
   id: string
+  /** 页签类型：collection = 绑定集合 / sql = 独立 SQL 编辑器 / shell = 独立 mongosh 编辑器 */
+  kind: 'collection' | 'sql' | 'shell'
   /** 页签所属连接，跨连接打开集合时互不干扰 */
   connId: string
   db: string
   coll: string
-  /** 查询栏模式：json = filter 文档 / sql = MySQL SELECT 子集 */
-  queryMode: 'json' | 'sql'
+  /** 查询栏模式：json = filter 文档 / sql = MySQL SELECT 子集 / shell = 完整 mongosh 命令 */
+  queryMode: 'json' | 'sql' | 'shell'
   sqlText: string
+  /** Shell 模式编辑框内容：完整 mongosh 命令（find / deleteMany 等） */
+  shellText: string
   filterText: string
   projectionText: string
   sortText: string
@@ -87,14 +96,22 @@ function newTabId(): string {
   return `t${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`
 }
 
-function makeTab(connId: string, db: string, coll: string): WorkTab {
+function makeTab(
+  kind: WorkTab['kind'],
+  connId: string,
+  db: string,
+  coll: string,
+  text = ''
+): WorkTab {
   return {
     id: newTabId(),
+    kind,
     connId,
     db,
     coll,
-    queryMode: 'json',
-    sqlText: '',
+    queryMode: kind === 'sql' ? 'sql' : kind === 'shell' ? 'shell' : 'json',
+    sqlText: kind === 'sql' ? text : '',
+    shellText: kind === 'shell' ? text : '',
     filterText: '{}',
     projectionText: '',
     sortText: '',
@@ -174,6 +191,8 @@ interface AppState {
   tabs: WorkTab[]
   activeTabId: string | null
   openCollection(connId: string, db: string, coll: string): void
+  /** 新增独立查询编辑器页签（SQL / mongosh），可重复添加 */
+  openQueryEditor(kind: 'sql' | 'shell'): void
   setActiveTab(id: string): void
   closeTab(id: string): void
   /** 更新当前活动页签的局部状态（新建引用触发渲染） */
@@ -186,6 +205,8 @@ interface AppState {
   runTab(tabId: string, options?: { resetSkip?: boolean }): Promise<void>
   /** 执行一段 SQL 文本（单行/选中执行用），不改动编辑器内容；新查询回到第一页 */
   runSqlText(text: string): Promise<void>
+  /** 执行一段完整 mongosh 命令（Shell 模式）：find 查询 / deleteOne / deleteMany / countDocuments */
+  runShellText(text: string): Promise<void>
   sampleForTab(tabId: string): Promise<void>
 
   // ---- 文档 CRUD（二期）----
@@ -207,6 +228,8 @@ interface AppState {
   dropIdx(connId: string, db: string, coll: string, name: string): Promise<{ ok: boolean; error?: string }>
 
   // ---- VQB ----
+  /** 设置活动页签查询模式；首次切 SQL / Shell 时由当前查询参数生成对应文本 */
+  setQueryMode(mode: WorkTab['queryMode']): void
   setVqbTree(tree: QueryGroup): void
   toggleVqb(): void
   importFilterToVqb(): boolean
@@ -306,8 +329,10 @@ async function executeSqlText(tabId: string, sqlText: string): Promise<void> {
     }))
     return
   }
+  // 集合名以 SQL 语句的 FROM 为准（独立 SQL 编辑器可查询任意集合）
+  const targetColl = translated.table !== '' ? translated.table : tab.coll
   if (translated.mode === 'aggregate') {
-    await runAggregate(connId, tabId, tab.db, tab.coll, translated.pipeline)
+    await runAggregate(connId, tabId, tab.db, targetColl, translated.pipeline)
     return
   }
   useAppStore.setState((state) => ({
@@ -315,6 +340,7 @@ async function executeSqlText(tabId: string, sqlText: string): Promise<void> {
       item.id === tabId
         ? {
             ...item,
+            coll: targetColl,
             filterText: JSON.stringify(translated.filter),
             projectionText: translated.projection !== null ? JSON.stringify(translated.projection) : '',
             sortText: translated.sort !== null ? JSON.stringify(translated.sort) : '',
@@ -528,16 +554,37 @@ export const useAppStore = create<AppState>((set, get) => ({
   /** 打开（或聚焦）一个集合页签，并自动运行首次查询 */
   openCollection: (connId, db, coll) => {
     const existing = get().tabs.find(
-      (tab) => tab.connId === connId && tab.db === db && tab.coll === coll
+      (tab) => tab.kind === 'collection' && tab.connId === connId && tab.db === db && tab.coll === coll
     )
     if (existing !== undefined) {
       set({ activeTabId: existing.id })
       return
     }
-    const tab = makeTab(connId, db, coll)
+    const tab = makeTab('collection', connId, db, coll)
     set((state) => ({ tabs: [...state.tabs, tab], activeTabId: tab.id }))
     void get().runTab(tab.id)
     void get().sampleForTab(tab.id)
+  },
+
+  /** 新增独立查询编辑器页签：默认库取活动连接默认库，模板引用当前集合 */
+  openQueryEditor: (kind) => {
+    const { activeConnId, connections, tabs, activeTabId } = get()
+    if (activeConnId === null) return
+    const conn = connections.find((item) => item.connId === activeConnId)
+    const current = tabs.find((item) => item.id === activeTabId) ?? null
+    const db =
+      current !== null && current.db !== ''
+        ? current.db
+        : (conn?.defaultDb !== '' && conn?.defaultDb !== undefined
+            ? conn.defaultDb
+            : (conn?.databases[0]?.name ?? 'test'))
+    const coll = current?.coll ?? ''
+    const text =
+      kind === 'sql'
+        ? `SELECT * FROM ${coll === '' ? 'collection' : coll} LIMIT 100`
+        : `db.getCollection("${coll === '' ? 'collection' : coll}").find({\n})\n`
+    const tab = makeTab(kind, activeConnId, db, coll, text)
+    set((state) => ({ tabs: [...state.tabs, tab], activeTabId: tab.id }))
   },
 
   setActiveTab: (id) => set({ activeTabId: id }),
@@ -560,6 +607,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   runTab: async (tabId, options) => {
     const tab = get().tabs.find((item) => item.id === tabId)
     if (tab === undefined) return
+    if (tab.queryMode === 'shell') {
+      await get().runShellText(tab.shellText)
+      return
+    }
     // 新查询从第一页开始：skip 归零后 executeFind/executeSqlText 读到的就是 0
     if (options?.resetSkip === true && tab.skip !== 0) {
       set((state) => ({
@@ -584,6 +635,79 @@ export const useAppStore = create<AppState>((set, get) => ({
       }))
     }
     await executeSqlText(tabId, text)
+  },
+
+  /** 执行 Shell 模式编辑框的完整 mongosh 命令 */
+  runShellText: async (text) => {
+    const tabId = get().activeTabId
+    if (tabId === null) return
+    const tab = get().tabs.find((item) => item.id === tabId)
+    if (tab === undefined) return
+    let parts: ShellCommandParts
+    try {
+      parts = parseShellCommand(text)
+    } catch (exc) {
+      get().patchActive({
+        runError: `命令解析失败: ${exc instanceof Error ? exc.message : String(exc)}`
+      })
+      return
+    }
+    // 集合以命令中的 getCollection 为准；独立 Shell 编辑器可查询任意集合
+    if (tab.kind !== 'shell' && parts.coll !== tab.coll) {
+      get().patchActive({
+        runError: `命令的集合 ${parts.coll} 与当前页签 ${tab.coll} 不一致`
+      })
+      return
+    }
+    const connId = tab.connId
+    const coll = parts.coll
+    // 独立 Shell 编辑器支持命令前缀 db.getSiblingDB("x") 指定库
+    const db = tab.kind === 'shell' && parts.db !== null ? parts.db : tab.db
+    const filterEjson = EJSON.stringify(parts.filter, { relaxed: false })
+
+    if (parts.op === 'find') {
+      // 命令里的查询参数写回页签状态后直接执行 find
+      // 注意：不能调 runTab——Shell 模式下 runTab 会再分发回 runShellText 形成无限递归
+      get().patchActive({
+        db,
+        coll,
+        filterText: toShellLiteral(parts.filter),
+        projectionText: parts.projection !== null ? toShellLiteral(parts.projection) : '',
+        sortText: parts.sort !== null ? toShellLiteral(parts.sort) : '',
+        skip: parts.skip ?? tab.skip,
+        limit: parts.limit ?? tab.limit,
+        runError: null
+      })
+      await executeFind(tabId)
+      return
+    }
+
+    if (parts.op === 'countDocuments') {
+      try {
+        const total = await backend.count(connId, db, coll, filterEjson)
+        window.alert(`countDocuments 匹配 ${total} 条文档`)
+      } catch (exc) {
+        get().patchActive({
+          runError: exc instanceof Error ? exc.message : String(exc)
+        })
+      }
+      return
+    }
+
+    const label =
+      parts.op === 'deleteMany'
+        ? 'deleteMany（删除全部匹配文档）'
+        : 'deleteOne（删除第一条匹配文档）'
+    if (!window.confirm(`确认执行 ${label}？\n${toShellLiteral(parts.filter)}`)) return
+    try {
+      const deleted = await backend.deleteByFilter(connId, db, coll, filterEjson, parts.op)
+      window.alert(`已删除 ${deleted} 条文档`)
+      get().patchActive({ runError: null })
+    } catch (exc) {
+      get().patchActive({
+        runError: exc instanceof Error ? exc.message : String(exc)
+      })
+    }
   },
 
   sampleForTab: async (tabId) => {
@@ -737,6 +861,50 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (exc) {
       return { ok: false, error: exc instanceof Error ? exc.message : String(exc) }
     }
+  },
+
+  // ---- VQB ----
+
+  setQueryMode: (mode) => {
+    const tab = get().tabs.find((item) => item.id === get().activeTabId)
+    if (tab === undefined || tab.queryMode === mode) return
+    if (mode === 'sql' && tab.sqlText.trim() === '') {
+      // 首次切到 SQL：用当前 filter 生成等价 SELECT（不可表达则留提示）
+      let doc: OrderedDoc = {}
+      try {
+        doc = parseShellLiteral(
+          tab.filterText.trim() === '' ? '{}' : tab.filterText
+        ) as OrderedDoc
+      } catch {
+        doc = {}
+      }
+      const sql = mongoFilterToSql(doc, tab.coll)
+      get().patchActive({
+        queryMode: 'sql',
+        sqlText: sql ?? '-- 当前 filter 含 SQL 无法表达的查询形态\n-- 请直接编写 MySQL 风格 SELECT'
+      })
+      return
+    }
+    if (mode === 'shell' && tab.shellText.trim() === '') {
+      // 首次切到 Shell：由当前查询参数生成完整 mongosh 命令
+      const parseDoc = (text: string): Value | null => {
+        if (text.trim() === '') return null
+        try {
+          return parseShellLiteral(text)
+        } catch {
+          return null
+        }
+      }
+      const command = generateShellCommand(tab.db, tab.coll, 'find', parseDoc(tab.filterText) ?? {}, {
+        projection: parseDoc(tab.projectionText) ?? undefined,
+        sort: parseDoc(tab.sortText) ?? undefined,
+        skip: tab.skip,
+        limit: tab.limit
+      })
+      get().patchActive({ queryMode: 'shell', shellText: command })
+      return
+    }
+    get().patchActive({ queryMode: mode })
   },
 
   setVqbTree: (tree) => {

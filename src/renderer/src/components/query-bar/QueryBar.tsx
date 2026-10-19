@@ -3,7 +3,7 @@ import type { JSX } from 'react'
 import Editor from '@monaco-editor/react'
 import { KeyCode, KeyMod } from 'monaco-editor'
 import type { editor as MonacoEditor } from 'monaco-editor'
-import { CornerDownLeft, Highlighter, Play, Loader2 } from 'lucide-react'
+import { Braces, CornerDownLeft, Highlighter, Play, Loader2, Terminal } from 'lucide-react'
 import type { WorkTab } from '../../store/app-store'
 import { useAppStore } from '../../store/app-store'
 import { ensureMonacoConfigured } from '../../lib/monaco'
@@ -20,6 +20,7 @@ function FilterEditor({
 }): JSX.Element {
   const patchActive = useAppStore((s) => s.patchActive)
   const isSql = tab.queryMode === 'sql'
+  const isShell = tab.queryMode === 'shell'
 
   const handleMount = useCallback(
     (instance: MonacoEditor.IStandaloneCodeEditor) => {
@@ -41,9 +42,15 @@ function FilterEditor({
         height="100%"
         defaultLanguage={isSql ? 'mysql' : 'javascript'}
         theme="vs-dark"
-        value={isSql ? tab.sqlText : tab.filterText}
+        value={isSql ? tab.sqlText : isShell ? tab.shellText : tab.filterText}
         onChange={(value) =>
-          patchActive(isSql ? { sqlText: value ?? '' } : { filterText: value ?? '' })
+          patchActive(
+            isSql
+              ? { sqlText: value ?? '' }
+              : isShell
+                ? { shellText: value ?? '' }
+                : { filterText: value ?? '' }
+          )
         }
         onMount={handleMount}
         options={{
@@ -68,19 +75,31 @@ function FilterEditor({
 
 type RunMode = 'line' | 'selection' | 'all'
 
-/** 查询区右侧：编辑器 + 三种执行方式（模式切换在页签栏，proj/sort/skip/limit 在 VQB 面板） */
+/** 查询模式三段 Tab */
+const QUERY_MODES: { mode: WorkTab['queryMode']; label: string; title: string }[] = [
+  { mode: 'json', label: 'JSON', title: 'MongoDB filter 文档（JSON / shell 语法）' },
+  { mode: 'sql', label: 'SQL', title: 'MySQL 风格 SELECT 子集' },
+  { mode: 'shell', label: 'Shell', title: '完整 mongosh 命令（find / deleteMany 等）' }
+]
+
+/** 查询区右侧：编辑器 + 模式三段 Tab（JSON / SQL / Shell）+ 三种执行方式 */
 export function QueryBar(): JSX.Element | null {
   const activeTab = useAppStore((s) => s.tabs.find((t) => t.id === s.activeTabId) ?? null)
   const patchActive = useAppStore((s) => s.patchActive)
+  const setQueryMode = useAppStore((s) => s.setQueryMode)
   const runTab = useAppStore((s) => s.runTab)
   const runSqlText = useAppStore((s) => s.runSqlText)
+  const runShellText = useAppStore((s) => s.runShellText)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
 
   if (activeTab === null) return null
 
-  /** 从编辑器提取执行目标文本；JSON 模式三种方式均执行完整 filter */
+  /** JSON（filter 文档）模式没有分句概念，三种方式都执行完整 filter */
+  const isTextMode = activeTab.queryMode !== 'json'
+
+  /** 从编辑器提取执行目标文本 */
   const extractText = (mode: RunMode): string | null => {
-    if (activeTab.queryMode !== 'sql') return activeTab.filterText
+    if (!isTextMode) return activeTab.filterText
     const instance = editorRef.current
     const model = instance?.getModel()
     if (instance === null || model === null || model === undefined) return null
@@ -98,7 +117,13 @@ export function QueryBar(): JSX.Element | null {
   }
 
   const runMode = (mode: RunMode): void => {
-    if (activeTab.queryMode !== 'sql') {
+    if (!isTextMode) {
+      // JSON filter：执行完整文档
+      void runTab(activeTab.id, { resetSkip: true })
+      return
+    }
+    if (mode === 'all' && activeTab.kind !== 'collection') {
+      // 独立编辑器「全部执行」交给 runTab 分发（SQL / Shell）
       void runTab(activeTab.id, { resetSkip: true })
       return
     }
@@ -109,7 +134,11 @@ export function QueryBar(): JSX.Element | null {
       })
       return
     }
-    void runSqlText(text)
+    if (activeTab.queryMode === 'shell') {
+      void runShellText(text)
+    } else {
+      void runSqlText(text)
+    }
   }
 
   return (
@@ -118,12 +147,38 @@ export function QueryBar(): JSX.Element | null {
 
       {/* 执行方式：SQL 模式支持单行/选中/全部，JSON 模式执行完整 filter */}
       <div className="flex h-7 shrink-0 items-center justify-end gap-1.5">
+        {/* 查询模式三段 Tab：仅集合页签可切换；独立 SQL / Shell 编辑器模式固定 */}
+        {activeTab.kind === 'collection' ? (
+          <div className="mr-auto flex h-6 shrink-0 items-center rounded border border-line bg-elevated p-0.5">
+            <Braces size={10} className="mx-1 shrink-0 text-text-faint" />
+            {QUERY_MODES.map(({ mode, label, title }) => (
+              <button
+                key={mode}
+                type="button"
+                title={title}
+                onClick={() => setQueryMode(mode)}
+                className={`h-5 cursor-pointer rounded px-2 text-[10px] transition-colors duration-fast ${
+                  activeTab.queryMode === mode
+                    ? 'bg-accent/20 font-medium text-accent'
+                    : 'text-text-muted hover:text-text-primary'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className="mr-auto flex shrink-0 items-center gap-1.5 text-[10px] text-text-muted">
+            {activeTab.kind === 'sql' ? <Braces size={11} /> : <Terminal size={11} />}
+            {activeTab.kind === 'sql' ? 'SQL 查询' : 'mongosh 查询'}
+          </span>
+        )}
         {activeTab.runError !== null && (
           <span className="min-w-0 flex-1 truncate text-[10px] text-danger" title={activeTab.runError}>
             {activeTab.runError}
           </span>
         )}
-        {activeTab.queryMode === 'sql' && (
+        {isTextMode && (
           <>
             <button
               type="button"

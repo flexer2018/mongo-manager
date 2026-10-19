@@ -50,6 +50,8 @@ export interface SqlSelect {
 export type SqlToMongoResult =
   | {
       mode: 'find'
+      /** FROM 后的集合名 */
+      table: string
       filter: Record<string, unknown>
       /** null = 不设 projection */
       projection: Record<string, number> | null
@@ -57,7 +59,7 @@ export type SqlToMongoResult =
       skip: number | null
       limit: number | null
     }
-  | { mode: 'aggregate'; pipeline: Record<string, unknown>[] }
+  | { mode: 'aggregate'; table: string; pipeline: Record<string, unknown>[] }
 
 interface Token {
   kind: 'ident' | 'string' | 'number' | 'op'
@@ -474,7 +476,7 @@ export function sqlToMongo(sql: string): SqlToMongoResult {
   const stmt = parseSqlSelect(sql)
   const filter = stmt.where !== null ? compileExpr(stmt.where) : {}
   if (isAggregateSelect(stmt)) {
-    return { mode: 'aggregate', pipeline: buildAggregatePipeline(stmt, filter) }
+    return { mode: 'aggregate', table: stmt.table, pipeline: buildAggregatePipeline(stmt, filter) }
   }
   const projection =
     stmt.items !== null
@@ -488,6 +490,7 @@ export function sqlToMongo(sql: string): SqlToMongoResult {
       : null
   return {
     mode: 'find',
+    table: stmt.table,
     filter,
     projection,
     sort,
