@@ -95,6 +95,14 @@ export interface IndexInfo {
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string }
 
+/** filter 更新的执行结果 */
+export interface UpdateByFilterResult {
+  matchedCount: number
+  modifiedCount: number
+  /** upsert 新插入文档的 _id（EJSON 字符串）；未 upsert 为 null */
+  upsertedId: string | null
+}
+
 /** 渲染进程唯一可用的数据访问契约（preload 经 contextBridge 暴露） */
 export interface MongoApi {
   listSaved(): Promise<IpcResult<SavedConnection[]>>
@@ -133,6 +141,18 @@ export interface MongoApi {
     op: 'deleteOne' | 'deleteMany'
   ): Promise<IpcResult<number>>
 
+  /** 按 filter 更新文档（Shell 模式 updateOne / updateMany 命令） */
+  updateByFilter(
+    connId: string,
+    db: string,
+    coll: string,
+    filter: string,
+    update: string,
+    op: 'updateOne' | 'updateMany',
+    /** 选项 EJSON（upsert / arrayFilters …），空串表示无 */
+    options?: string
+  ): Promise<IpcResult<UpdateByFilterResult>>
+
   // ---- 集合管理（二期）----
   /** 创建集合；opts 支持 timeField（时间序列）/clustered/capped */
   createCollection(connId: string, db: string, name: string, opts?: CreateCollectionOptions): Promise<IpcResult<true>>
@@ -163,6 +183,7 @@ export const IPC = {
   replaceOne: 'docs:replaceOne',
   deleteOne: 'docs:deleteOne',
   deleteByFilter: 'docs:deleteByFilter',
+  updateByFilter: 'docs:updateByFilter',
 
   createCollection: 'coll:create',
   dropCollection: 'coll:drop',

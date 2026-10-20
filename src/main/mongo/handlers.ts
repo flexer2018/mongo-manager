@@ -5,7 +5,7 @@
  */
 import { ipcMain } from 'electron'
 import { EJSON } from 'bson'
-import type { Document, Sort } from 'mongodb'
+import type { Document, Sort, UpdateOptions } from 'mongodb'
 import {
   ConnectionManager,
   addSaved,
@@ -245,6 +245,41 @@ export function registerMongoHandlers(): void {
           ? await collection.deleteOne(filter as Document)
           : await collection.deleteMany(filter as Document)
       return result.deletedCount
+    }
+  )
+
+  handle(
+    IPC.updateByFilter,
+    async (
+      connId: string,
+      db: string,
+      coll: string,
+      filterText: string,
+      updateText: string,
+      op: 'updateOne' | 'updateMany',
+      optionsText?: string
+    ) => {
+      const filter = parseEjson(filterText)
+      // update 既可以是更新文档，也可以是聚合管道数组，故用任意值解析
+      const update = parseEjsonValue(updateText)
+      const options =
+        optionsText !== undefined && optionsText.trim() !== ''
+          ? (parseEjson(optionsText) as UpdateOptions)
+          : {}
+      const collection = connections.client(connId).db(db).collection(coll)
+      const target = update as Document | Document[]
+      const result =
+        op === 'updateOne'
+          ? await collection.updateOne(filter as Document, target as Document, options)
+          : await collection.updateMany(filter as Document, target as Document, options)
+      return {
+        matchedCount: result.matchedCount,
+        modifiedCount: result.modifiedCount,
+        upsertedId:
+          result.upsertedId === undefined || result.upsertedId === null
+            ? null
+            : ejson(result.upsertedId)
+      }
     }
   )
 

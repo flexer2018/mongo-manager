@@ -69,10 +69,34 @@ describe('parseShellCommand', () => {
     expect(parseShellCommand('db["c"].countDocuments({})').op).toBe('countDocuments')
   })
 
-  it('不支持的操作与集合不一致时报错', () => {
-    expect(() => parseShellCommand('db.c.updateMany({}, {$set: {a: 1}})')).toThrow(
-      /不支持的命令/
+  it('updateMany：filter + 更新操作符文档 + 选项', () => {
+    const parts = parseShellCommand(
+      `db.getCollection("mf_tweet_202610").updateMany({
+        keyword_processed: true,
+        keyword_matched: false
+      }, {'$unset': {keyword_processed: null}})`
     )
+    expect(parts.op).toBe('updateMany')
+    expect(parts.coll).toBe('mf_tweet_202610')
+    expect(parts.filter).toEqual({ keyword_processed: true, keyword_matched: false })
+    expect(parts.update).toEqual({ $unset: { keyword_processed: null } })
+    expect(parts.options).toBeNull()
+
+    const withOptions = parseShellCommand('db.c.updateMany({a: 1}, {$set: {b: 2}}, {upsert: true})')
+    expect(withOptions.options).toEqual({ upsert: true })
+    expect(parseShellCommand('db.c.updateOne({a: 1}, {$inc: {n: 1}})').op).toBe('updateOne')
+  })
+
+  it('update 文档必须是操作符形态，选项未知时报错', () => {
+    expect(() => parseShellCommand('db.c.updateMany({}, {a: 1})')).toThrow(/更新操作符/)
+    expect(() => parseShellCommand('db.c.updateMany({})')).toThrow(/两个参数/)
+    expect(() => parseShellCommand('db.c.updateMany({}, {$set: {a: 1}}, {abc: 1})')).toThrow(
+      /不支持的选项/
+    )
+  })
+
+  it('不支持的操作报错、正常命令可通过', () => {
+    expect(() => parseShellCommand('db.c.insertOne({a: 1})')).toThrow(/不支持的命令/)
     expect(() => parseShellCommand('db.c.find({})')).not.toThrow()
   })
 })

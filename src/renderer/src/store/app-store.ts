@@ -694,6 +694,44 @@ export const useAppStore = create<AppState>((set, get) => ({
       return
     }
 
+    if (parts.op === 'updateOne' || parts.op === 'updateMany') {
+      const update = parts.update
+      if (update === null) {
+        get().patchActive({ runError: `${parts.op}() 缺少 update 参数` })
+        return
+      }
+      const label =
+        parts.op === 'updateMany' ? 'updateMany（更新全部匹配文档）' : 'updateOne（更新第一条匹配文档）'
+      const updateEjson = EJSON.stringify(update, { relaxed: false })
+      const optionsEjson =
+        parts.options !== null ? EJSON.stringify(parts.options, { relaxed: false }) : ''
+      const confirmed = window.confirm(
+        `确认执行 ${label}？\n\nfilter：\n${toShellLiteral(parts.filter)}\n\nupdate：\n${toShellLiteral(update)}`
+      )
+      if (!confirmed) return
+      try {
+        const result = await backend.updateByFilter(
+          connId,
+          db,
+          coll,
+          filterEjson,
+          updateEjson,
+          parts.op,
+          optionsEjson
+        )
+        const upserted = result.upsertedId === null ? '' : `，upsert 新文档 _id=${result.upsertedId}`
+        window.alert(
+          `${parts.op} 完成：匹配 ${result.matchedCount} 条，修改 ${result.modifiedCount} 条${upserted}`
+        )
+        get().patchActive({ runError: null })
+      } catch (exc) {
+        get().patchActive({
+          runError: exc instanceof Error ? exc.message : String(exc)
+        })
+      }
+      return
+    }
+
     const label =
       parts.op === 'deleteMany'
         ? 'deleteMany（删除全部匹配文档）'

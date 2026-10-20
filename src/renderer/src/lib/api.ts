@@ -12,7 +12,8 @@ import type {
   FindRequest,
   FindResult,
   IndexInfo,
-  SavedConnection
+  SavedConnection,
+  UpdateByFilterResult
 } from '../../../shared/types'
 
 const api = window.mongoApi
@@ -58,6 +59,16 @@ export const backend = {
     filter: string,
     op: 'deleteOne' | 'deleteMany'
   ): Promise<number> => unwrap(api.deleteByFilter(connId, db, coll, filter, op)),
+  updateByFilter: (
+    connId: string,
+    db: string,
+    coll: string,
+    filter: string,
+    update: string,
+    op: 'updateOne' | 'updateMany',
+    options?: string
+  ): Promise<UpdateByFilterResult> =>
+    unwrap(api.updateByFilter(connId, db, coll, filter, update, op, options)),
 
   // ---- 集合管理（二期）----
   createCollection: (

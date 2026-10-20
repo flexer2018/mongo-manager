@@ -438,7 +438,13 @@ export function parseShellLiteral(source: string): Value {
 
 // --- 完整 mongosh 命令解析（Shell 查询模式编辑框） -----------------------------
 
-export type ShellCommandOp = 'find' | 'deleteOne' | 'deleteMany' | 'countDocuments'
+export type ShellCommandOp =
+  | 'find'
+  | 'deleteOne'
+  | 'deleteMany'
+  | 'countDocuments'
+  | 'updateOne'
+  | 'updateMany'
 
 export interface ShellCommandParts {
   op: ShellCommandOp
@@ -448,6 +454,10 @@ export interface ShellCommandParts {
   filter: Value
   /** 仅 find 第二参数 */
   projection: Value | null
+  /** 仅 updateOne / updateMany 第二参数：更新文档（$set / $unset …）或聚合管道数组 */
+  update: Value | null
+  /** 仅 updateOne / updateMany 第三参数：选项文档（upsert / arrayFilters …） */
+  options: Value | null
   sort: Value | null
   skip: number | null
   limit: number | null
@@ -458,8 +468,20 @@ const COMMAND_OPS: Record<string, ShellCommandOp> = {
   findone: 'find',
   deleteone: 'deleteOne',
   deletemany: 'deleteMany',
-  countdocuments: 'countDocuments'
+  countdocuments: 'countDocuments',
+  updateone: 'updateOne',
+  updatemany: 'updateMany'
 }
+
+/** updateOne / updateMany 第三参数支持的关键字（其余直接报错，避免静默忽略） */
+const UPDATE_OPTION_KEYS = [
+  'upsert',
+  'arrayFilters',
+  'collation',
+  'hint',
+  'let',
+  'bypassDocumentValidation'
+]
 
 /** db = db.getSiblingDB("x"); 前缀（generateShellCommand 产物），可剥离 */
 const SIBLING_DB_RE =
@@ -486,10 +508,44 @@ function sliceValueTokens(tokens: Token[], from: number): { slice: Token[]; end:
   }
 }
 
+/** 校验 updateOne / updateMany 的 update 参数：更新操作符文档或聚合管道 */
+function validateUpdateDoc(update: Value, op: string): void {
+  if (Array.isArray(update)) {
+    if (update.length === 0) throw new ShellLiteralError(`${op}() 的 update 管道不能为空数组`)
+    return
+  }
+  if (typeof update !== 'object' || update === null) {
+    throw new ShellLiteralError(`${op}() 的 update 必须是文档（如 { $set: { a: 1 } }）或聚合管道数组`)
+  }
+  const keys = Object.keys(update)
+  if (keys.length === 0) {
+    throw new ShellLiteralError(`${op}() 的 update 不能是空文档，至少需要一个更新操作符`)
+  }
+  if (!keys.every((key) => key.startsWith('$'))) {
+    throw new ShellLiteralError(
+      `${op}() 的 update 必须使用更新操作符（$set / $unset / $inc …），不能是整文档替换`
+    )
+  }
+}
+
+/** 校验 updateOne / updateMany 的选项参数：只允许已知关键字 */
+function validateUpdateOptions(options: Value, op: string): void {
+  if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+    throw new ShellLiteralError(`${op}() 第三个参数必须是选项文档，如 { upsert: true }`)
+  }
+  const unknown = Object.keys(options).filter((key) => !UPDATE_OPTION_KEYS.includes(key))
+  if (unknown.length > 0) {
+    throw new ShellLiteralError(
+      `${op}() 不支持的选项: ${unknown.join(', ')}；可用: ${UPDATE_OPTION_KEYS.join(', ')}`
+    )
+  }
+}
+
 /**
  * 解析完整 mongosh 命令：
  *   db.getCollection("c").find({...}, {...}).sort({...}).skip(n).limit(n)
  *   db.getCollection("c").deleteMany({...}) / deleteOne / countDocuments
+ *   db.getCollection("c").updateMany({...}, {$set: {...}}, {upsert: true}) / updateOne
  * 也接受 db.c.find(...) 与 db["c"].find(...) 形态；findOne 等价 find。
  */
 export function parseShellCommand(source: string): ShellCommandParts {
@@ -548,7 +604,7 @@ export function parseShellCommand(source: string): ShellCommandParts {
   const op = COMMAND_OPS[opKey]
   if (op === undefined) {
     throw new ShellLiteralError(
-      `不支持的命令 .${opToken.text}()；支持 find / findOne / deleteOne / deleteMany / countDocuments`
+      `不支持的命令 .${opToken.text}()；支持 find / findOne / deleteOne / deleteMany / updateOne / updateMany / countDocuments`
     )
   }
   expectT('(')
@@ -592,11 +648,22 @@ export function parseShellCommand(source: string): ShellCommandParts {
     else if (name === 'limit') limit = toInt(value)
   }
 
-  const maxArgs = op === 'find' ? 2 : 1
+  const maxArgs = op === 'find' ? 2 : op === 'updateOne' || op === 'updateMany' ? 3 : 1
   if (args.length > maxArgs) {
     throw new ShellLiteralError(
       `${op}() 最多接受 ${maxArgs} 个参数，实际 ${args.length} 个`
     )
+  }
+  let update: Value | null = null
+  let options: Value | null = null
+  if (op === 'updateOne' || op === 'updateMany') {
+    if (args.length < 2) {
+      throw new ShellLiteralError(`${op}() 需要 filter 与 update 两个参数`)
+    }
+    update = args[1]
+    validateUpdateDoc(update, op)
+    options = args[2] ?? null
+    if (options !== null) validateUpdateOptions(options, op)
   }
   return {
     op,
@@ -604,6 +671,8 @@ export function parseShellCommand(source: string): ShellCommandParts {
     coll,
     filter: args[0] ?? {},
     projection: op === 'find' ? (args[1] ?? null) : null,
+    update,
+    options,
     sort,
     skip,
     limit

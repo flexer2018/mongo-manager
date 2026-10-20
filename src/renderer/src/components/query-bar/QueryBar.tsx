@@ -1,9 +1,19 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import Editor from '@monaco-editor/react'
 import { KeyCode, KeyMod } from 'monaco-editor'
 import type { editor as MonacoEditor } from 'monaco-editor'
-import { Braces, CornerDownLeft, Highlighter, Play, Loader2, Terminal } from 'lucide-react'
+import {
+  Braces,
+  Check,
+  Copy,
+  CornerDownLeft,
+  Highlighter,
+  Play,
+  Loader2,
+  Terminal,
+  X
+} from 'lucide-react'
 import type { WorkTab } from '../../store/app-store'
 import { useAppStore } from '../../store/app-store'
 import { ensureMonacoConfigured } from '../../lib/monaco'
@@ -79,7 +89,11 @@ type RunMode = 'line' | 'selection' | 'all'
 const QUERY_MODES: { mode: WorkTab['queryMode']; label: string; title: string }[] = [
   { mode: 'json', label: 'JSON', title: 'MongoDB filter 文档（JSON / shell 语法）' },
   { mode: 'sql', label: 'SQL', title: 'MySQL 风格 SELECT 子集' },
-  { mode: 'shell', label: 'Shell', title: '完整 mongosh 命令（find / deleteMany 等）' }
+  {
+    mode: 'shell',
+    label: 'Shell',
+    title: '完整 mongosh 命令（find / deleteMany / updateMany 等）'
+  }
 ]
 
 /** 查询区右侧：编辑器 + 模式三段 Tab（JSON / SQL / Shell）+ 三种执行方式 */
@@ -91,8 +105,19 @@ export function QueryBar(): JSX.Element | null {
   const runSqlText = useAppStore((s) => s.runSqlText)
   const runShellText = useAppStore((s) => s.runShellText)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
+  const [errorCopied, setErrorCopied] = useState(false)
 
   if (activeTab === null) return null
+
+  /** 错误信息一键复制：便于把完整报错贴到 issue / 排查 */
+  const copyError = (): void => {
+    const message = activeTab.runError
+    if (message === null) return
+    void navigator.clipboard.writeText(message).then(() => {
+      setErrorCopied(true)
+      window.setTimeout(() => setErrorCopied(false), 1200)
+    })
+  }
 
   /** JSON（filter 文档）模式没有分句概念，三种方式都执行完整 filter */
   const isTextMode = activeTab.queryMode !== 'json'
@@ -174,9 +199,39 @@ export function QueryBar(): JSX.Element | null {
           </span>
         )}
         {activeTab.runError !== null && (
-          <span className="min-w-0 flex-1 truncate text-[10px] text-danger" title={activeTab.runError}>
-            {activeTab.runError}
-          </span>
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            <span
+              className="min-w-0 cursor-text truncate text-[10px] text-danger select-text"
+              title={activeTab.runError}
+            >
+              {activeTab.runError}
+            </span>
+            <button
+              type="button"
+              onClick={copyError}
+              title="复制错误信息"
+              className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded border border-line bg-elevated px-1.5 py-0.5 text-[10px] text-text-secondary transition-colors duration-fast hover:border-accent-dim hover:text-accent"
+            >
+              {errorCopied ? (
+                <>
+                  <Check size={11} className="text-accent" /> 已复制
+                </>
+              ) : (
+                <>
+                  <Copy size={11} /> 复制
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => patchActive({ runError: null })}
+              title="关闭提示"
+              className="flex shrink-0 cursor-pointer items-center rounded px-1 py-0.5 text-text-muted transition-colors duration-fast hover:bg-hover hover:text-text-primary"
+            >
+              <X size={11} />
+            </button>
+            <div className="flex-1" />
+          </div>
         )}
         {isTextMode && (
           <>
