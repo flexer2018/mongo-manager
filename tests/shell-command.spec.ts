@@ -101,6 +101,23 @@ describe('parseShellCommand', () => {
   })
 })
 
+describe('$exists 往返（VQB 导入 / 导出）', () => {
+  it('完整 find 命令 → 查询树 → $exists: false 文档', () => {
+    const source = `db.getCollection("mf_tweet_202610").find({
+  keyword_processed: {
+    $exists: false
+  }
+})`
+    const tree = parseFindFilter(source)
+    expect(tree.children).toHaveLength(1)
+    expect(tree.children[0]).toMatchObject({
+      field: 'keyword_processed',
+      operator: 'DOES_NOT_EXIST'
+    })
+    expect(toBson(tree)).toEqual({ keyword_processed: { $exists: false } })
+  })
+})
+
 describe('language registry', () => {
   it('注册名使用生成器实例名（LABELS 可匹配）', () => {
     expect(availableLanguages()).toEqual(['MongoDB Shell', 'Python', 'JavaScript (Node.js)'])

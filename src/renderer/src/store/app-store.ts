@@ -245,6 +245,23 @@ function commitTree(tab: WorkTab, tree: QueryGroup): Partial<WorkTab> {
   return { vqbTree: clone, filterText: dumps(toBson(clone), 0) }
 }
 
+/**
+ * filter 文本 → 查询树（查询栏编辑 / SQL 翻译 / Shell 命令回写时同步 VQB）。
+ * 返回 null 表示不需要替换：文本非法（保留旧树）或语义与当前树相同
+ * （例如树编辑后回写 filter 触发的等价文本，避免打断正在编辑的 VQB 行）。
+ */
+function treeFromFilterText(current: QueryGroup, text: string): QueryGroup | null {
+  try {
+    const tree = parseFindFilter(text.trim() === '' ? '{}' : text)
+    const sameDoc =
+      EJSON.stringify(toBson(tree), { relaxed: false }) ===
+      EJSON.stringify(toBson(current), { relaxed: false })
+    return sameDoc ? null : tree
+  } catch {
+    return null
+  }
+}
+
 /** 集合变更后：强制重载该库的分桶缓存，并触发一次渲染 */
 async function refreshDb(connId: string, db: string): Promise<void> {
   const store = useAppStore.getState()
@@ -609,7 +626,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   patchActive: (patch) => {
     set((state) => ({
-      tabs: state.tabs.map((tab) => (tab.id === state.activeTabId ? { ...tab, ...patch } : tab))
+      tabs: state.tabs.map((tab) => {
+        if (tab.id !== state.activeTabId) return tab
+        const next = { ...tab, ...patch }
+        // filter 文本一变就重建查询树：查询栏手写 / SQL 翻译 / Shell 命令回写都能反映到 VQB
+        if (typeof patch.filterText === 'string' && next.vqbTree !== null) {
+          const synced = treeFromFilterText(next.vqbTree, patch.filterText)
+          if (synced !== null) next.vqbTree = synced
+        }
+        return next
+      })
     }))
   },
 

@@ -28,6 +28,8 @@ import {
   operatorDescription,
   applicableOperator,
   isRangeOperator,
+  needsValue,
+  parseFindFilter,
   parseShellLiteral,
   dumps,
   isPlainObject
@@ -434,6 +436,8 @@ function RuleRow({
   const isCustom = rule.operator === 'CUSTOM'
   const isTextual = rule.operator === 'TEXT_INDEX_SEARCH'
   const isRange = isRangeOperator(rule.operator)
+  // exists / doesn't exist / is null 等无值操作符不需要取值输入框
+  const showValue = needsValue(rule.operator) && !isTextual
 
   // 时间选择器：日期字段 / 已是 Date 值时自动出现，也可手动开关（两个值共用开关）
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -479,7 +483,7 @@ function RuleRow({
         ))}
       </select>
 
-      {!isTextual && (
+      {showValue && (
         <input
           value={valueToText(rule.value)}
           onChange={(event) => update({ value: textToValue(event.target.value, fieldType) })}
@@ -487,7 +491,7 @@ function RuleRow({
           className="mono h-6 min-w-0 flex-1 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none placeholder:text-text-faint focus:border-accent-dim"
         />
       )}
-      {!isTextual && showPicker && (
+      {showValue && showPicker && (
         <input
           type="datetime-local"
           step={0.001}
@@ -524,7 +528,7 @@ function RuleRow({
           className="h-6 w-28 shrink-0 rounded border border-line bg-base px-1 text-[11px] text-text-primary outline-none focus:border-accent-dim"
         />
       )}
-      {!isTextual && !fieldType && (
+      {showValue && !fieldType && (
         <button
           type="button"
           onClick={() => setPickerOpen(!pickerOpen)}
@@ -941,14 +945,27 @@ export function VqbPanel(): JSX.Element | null {
   )
   const [notice, setNotice] = useState<string | null>(null)
 
-  // 首次打开时建一棵带空规则的树（副作用放 useEffect，不在渲染期写 store）
+  // 首次打开时建树：优先用当前 filter 反解析（避免空树把已有查询覆盖成 {}），
+  // 反解析失败或 filter 为空才建一棵带空规则的树
   useEffect(() => {
-    if (vqbOpen && vqbTree === null) {
-      const root = createQueryGroup({ op: 'AND', isRoot: true })
-      root.children = [createFieldRule({ field: '' })]
-      setVqbTree(root)
+    if (!vqbOpen || vqbTree !== null) return
+    let root: QueryGroup | null = null
+    if (activeTab !== null) {
+      try {
+        root = parseFindFilter(activeTab.filterText || '{}')
+      } catch {
+        root = null
+      }
     }
-  }, [vqbOpen, vqbTree, setVqbTree])
+    if (root === null) {
+      root = createQueryGroup({ op: 'AND', isRoot: true })
+      root.children = [createFieldRule({ field: '' })]
+    } else if (root.children.length === 0) {
+      root.children = [createFieldRule({ field: '' })]
+    }
+    // 只写树不写 filter：保留用户在查询栏里的原始书写（导出时才会规范化）
+    patchActive({ vqbTree: root })
+  }, [vqbOpen, vqbTree, patchActive, activeTab])
 
   if (!vqbOpen) return null
 
