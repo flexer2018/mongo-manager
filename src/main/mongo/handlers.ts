@@ -15,6 +15,7 @@ import {
 } from './connection-manager'
 import {
   AggregateRequest,
+  CollectionStats,
   CreateCollectionOptions,
   CreateIndexRequest,
   DocTarget,
@@ -350,6 +351,36 @@ export function registerMongoHandlers(): void {
     if (!name || name === '_id_') throw new Error('_id 索引不可删除')
     await connections.client(connId).db(db).collection(coll).dropIndex(name)
     return true as const
+  })
+
+  // ---- 集合统计 ----
+
+  handle(IPC.collStats, async (connId: string, db: string, coll: string) => {
+    const database = connections.client(connId).db(db)
+    // 视图等不支持 collStats 的集合回退到 $collStats 聚合
+    const stats =
+      (await database.command({ collStats: coll }).catch(async () => {
+        const [doc] = await database
+          .collection(coll)
+          .aggregate([{ $collStats: { storageStats: {} } }])
+          .toArray()
+        return { ...(doc ?? {}), ...((doc?.storageStats as Document | undefined) ?? {}) }
+      })) as Document
+    const num = (value: unknown): number => {
+      const parsed = Number(value)
+      return Number.isFinite(parsed) ? parsed : 0
+    }
+    return {
+      ns: String(stats.ns ?? `${db}.${coll}`),
+      count: num(stats.count),
+      size: num(stats.size),
+      storageSize: num(stats.storageSize),
+      avgObjSize: num(stats.avgObjSize),
+      nindexes: num(stats.nindexes),
+      totalIndexSize: num(stats.totalIndexSize),
+      capped: Boolean(stats.capped),
+      raw: ejson(stats)
+    } satisfies CollectionStats
   })
 }
 

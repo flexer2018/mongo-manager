@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import {
+  BarChart3,
+  Braces,
   ChevronDown,
   ChevronRight,
+  Copy,
   FolderClosed,
   FolderOpen,
   Layers,
@@ -10,6 +13,7 @@ import {
   PlugZap,
   Plus,
   Table2,
+  Terminal,
   Trash2
 } from 'lucide-react'
 import { CollectionKind, CollectionNode } from '@core'
@@ -17,7 +21,9 @@ import { useAppStore } from '../../store/app-store'
 import type { ConnEntry } from '../../store/app-store'
 import { CONN_COLORS } from '../../store/app-store'
 import { ConfirmDialog } from '../ConfirmDialog'
+import { ContextMenu } from '../ContextMenu'
 import { CollModal } from './CollModal'
+import { CollStatsModal } from './CollStatsModal'
 
 /** 集合类型徽标：普通 c / 视图 v / 系统 s / 时间序列 ts / 聚簇 cl */
 const KIND_BADGE: Record<string, { label: string; cls: string }> = {
@@ -43,6 +49,7 @@ function CollectionRow({
 }): JSX.Element {
   const activeTab = useAppStore((s) => s.tabs.find((t) => t.id === s.activeTabId) ?? null)
   const openCollection = useAppStore((s) => s.openCollection)
+  const openQueryEditor = useAppStore((s) => s.openQueryEditor)
   const isActive =
     activeTab !== null &&
     activeTab.connId === connId &&
@@ -52,13 +59,30 @@ function CollectionRow({
   const isSystem = node.kind === CollectionKind.SYSTEM
 
   const [confirmDrop, setConfirmDrop] = useState(false)
+  /** 右键菜单坐标（null 表示未打开） */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const [statsOpen, setStatsOpen] = useState(false)
+  /** 复制后的短暂位置提示 */
+  const [copiedAt, setCopiedAt] = useState<{ x: number; y: number } | null>(null)
 
   const drop = (): void => {
     setConfirmDrop(true)
   }
 
+  const copyName = (x: number, y: number): void => {
+    void navigator.clipboard.writeText(node.name).then(() => {
+      setCopiedAt({ x, y })
+      window.setTimeout(() => setCopiedAt(null), 1000)
+    })
+  }
+
   return (
     <div
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        setMenu({ x: event.clientX, y: event.clientY })
+      }}
       className={`group flex h-6 w-full items-center rounded pr-1 text-xs transition-colors duration-fast ${
         isActive ? 'bg-active' : 'hover:bg-hover'
       }`}
@@ -117,6 +141,48 @@ function CollectionRow({
           }}
           onClose={() => setConfirmDrop(false)}
         />
+      )}
+      {menu !== null && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            {
+              label: '复制集合名称',
+              icon: <Copy size={11} />,
+              onSelect: () => copyName(menu.x, menu.y)
+            },
+            {
+              label: '打开 SQL 查询',
+              icon: <Braces size={11} />,
+              dividerBefore: true,
+              onSelect: () => openQueryEditor('sql', { connId, db, coll: node.name })
+            },
+            {
+              label: '打开 Shell 查询',
+              icon: <Terminal size={11} />,
+              onSelect: () => openQueryEditor('shell', { connId, db, coll: node.name })
+            },
+            {
+              label: '查看集合统计',
+              icon: <BarChart3 size={11} />,
+              dividerBefore: true,
+              onSelect: () => setStatsOpen(true)
+            }
+          ]}
+        />
+      )}
+      {statsOpen && (
+        <CollStatsModal connId={connId} db={db} coll={node.name} onClose={() => setStatsOpen(false)} />
+      )}
+      {copiedAt !== null && (
+        <div
+          className="pointer-events-none fixed z-[110] rounded border border-line bg-elevated px-2 py-1 text-[10px] text-accent shadow-xl"
+          style={{ left: copiedAt.x, top: copiedAt.y }}
+        >
+          已复制集合名称
+        </div>
       )}
     </div>
   )

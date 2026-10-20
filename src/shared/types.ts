@@ -93,6 +93,20 @@ export interface IndexInfo {
   raw: string
 }
 
+/** 集合统计摘要（来自 collStats 命令） */
+export interface CollectionStats {
+  ns: string
+  count: number
+  size: number
+  storageSize: number
+  avgObjSize: number
+  nindexes: number
+  totalIndexSize: number
+  capped: boolean
+  /** 完整 collStats 输出（EJSON 字符串），供弹窗展示细节 */
+  raw: string
+}
+
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string }
 
 /** filter 更新的执行结果 */
@@ -163,6 +177,9 @@ export interface MongoApi {
   listIndexes(connId: string, db: string, coll: string): Promise<IpcResult<IndexInfo[]>>
   createIndex(req: CreateIndexRequest): Promise<IpcResult<string>>
   dropIndex(connId: string, db: string, coll: string, name: string): Promise<IpcResult<true>>
+
+  /** 集合统计（collStats 命令），用于树上右键「查看集合统计」 */
+  collStats(connId: string, db: string, coll: string): Promise<IpcResult<CollectionStats>>
 }
 
 export const IPC = {
@@ -191,5 +208,7 @@ export const IPC = {
 
   listIndexes: 'idx:list',
   createIndex: 'idx:create',
-  dropIndex: 'idx:drop'
+  dropIndex: 'idx:drop',
+
+  collStats: 'coll:stats'
 } as const

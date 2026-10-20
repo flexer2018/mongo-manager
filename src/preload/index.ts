@@ -53,7 +53,9 @@ const api: MongoApi = {
     ipcRenderer.invoke(IPC.listIndexes, connId, db, coll),
   createIndex: (req: CreateIndexRequest) => ipcRenderer.invoke(IPC.createIndex, req),
   dropIndex: (connId, db, coll, name) =>
-    ipcRenderer.invoke(IPC.dropIndex, connId, db, coll, name)
+    ipcRenderer.invoke(IPC.dropIndex, connId, db, coll, name),
+
+  collStats: (connId, db, coll) => ipcRenderer.invoke(IPC.collStats, connId, db, coll)
 }
 
 contextBridge.exposeInMainWorld('mongoApi', api)

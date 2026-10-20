@@ -4,6 +4,7 @@
 import type {
   AggregateRequest,
   AggregateResult,
+  CollectionStats,
   ConnectResult,
   CreateCollectionOptions,
   CreateIndexRequest,
@@ -12,6 +13,7 @@ import type {
   FindRequest,
   FindResult,
   IndexInfo,
+  MongoApi,
   SavedConnection,
   UpdateByFilterResult
 } from '../../../shared/types'
@@ -87,5 +89,16 @@ export const backend = {
     unwrap(api.listIndexes(connId, db, coll)),
   createIndex: (req: CreateIndexRequest): Promise<string> => unwrap(api.createIndex(req)),
   dropIndex: (connId: string, db: string, coll: string, name: string): Promise<true> =>
-    unwrap(api.dropIndex(connId, db, coll, name))
+    unwrap(api.dropIndex(connId, db, coll, name)),
+
+  // ---- 集合统计 ----
+  collStats: (connId: string, db: string, coll: string): Promise<CollectionStats> => {
+    // 兼容旧 preload（未重建时没有该方法）：返回可读错误，
+    // 而不是同步抛 TypeError 把整个渲染树打挂成白屏
+    const invoke = (api as Partial<MongoApi>).collStats
+    if (typeof invoke !== 'function') {
+      return Promise.reject(new Error('当前 preload 未包含集合统计接口，请重启应用后重试'))
+    }
+    return unwrap(invoke(connId, db, coll))
+  }
 }

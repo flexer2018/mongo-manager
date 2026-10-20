@@ -191,8 +191,11 @@ interface AppState {
   tabs: WorkTab[]
   activeTabId: string | null
   openCollection(connId: string, db: string, coll: string): void
-  /** 新增独立查询编辑器页签（SQL / mongosh），可重复添加 */
-  openQueryEditor(kind: 'sql' | 'shell'): void
+  /**
+   * 新增独立查询编辑器页签（SQL / mongosh），可重复添加。
+   * target 用于从导航树右键指定连接/库/集合；缺省取活动连接与当前页签上下文。
+   */
+  openQueryEditor(kind: 'sql' | 'shell', target?: { connId: string; db: string; coll: string }): void
   setActiveTab(id: string): void
   closeTab(id: string): void
   /** 更新当前活动页签的局部状态（新建引用触发渲染） */
@@ -567,24 +570,30 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   /** 新增独立查询编辑器页签：默认库取活动连接默认库，模板引用当前集合 */
-  openQueryEditor: (kind) => {
-    const { activeConnId, connections, tabs, activeTabId } = get()
-    if (activeConnId === null) return
-    const conn = connections.find((item) => item.connId === activeConnId)
+  openQueryEditor: (kind, target) => {
+    const { connections, tabs, activeTabId } = get()
+    const connId = target?.connId ?? get().activeConnId
+    if (connId === null) return
+    const conn = connections.find((item) => item.connId === connId)
     const current = tabs.find((item) => item.id === activeTabId) ?? null
     const db =
-      current !== null && current.db !== ''
+      target?.db ??
+      (current !== null && current.db !== ''
         ? current.db
         : (conn?.defaultDb !== '' && conn?.defaultDb !== undefined
             ? conn.defaultDb
-            : (conn?.databases[0]?.name ?? 'test'))
-    const coll = current?.coll ?? ''
+            : (conn?.databases[0]?.name ?? 'test')))
+    const coll = target?.coll ?? current?.coll ?? ''
     const text =
       kind === 'sql'
         ? `SELECT * FROM ${coll === '' ? 'collection' : coll} LIMIT 100`
         : `db.getCollection("${coll === '' ? 'collection' : coll}").find({\n})\n`
-    const tab = makeTab(kind, activeConnId, db, coll, text)
-    set((state) => ({ tabs: [...state.tabs, tab], activeTabId: tab.id }))
+    const tab = makeTab(kind, connId, db, coll, text)
+    set({
+      tabs: [...tabs, tab],
+      activeTabId: tab.id,
+      ...(target !== undefined ? { activeConnId: connId } : {})
+    })
   },
 
   setActiveTab: (id) => set({ activeTabId: id }),
