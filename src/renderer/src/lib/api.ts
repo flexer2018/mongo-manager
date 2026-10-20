@@ -100,5 +100,12 @@ export const backend = {
       return Promise.reject(new Error('当前 preload 未包含集合统计接口，请重启应用后重试'))
     }
     return unwrap(invoke(connId, db, coll))
+  },
+  collStatsAll: (connId: string, db: string): Promise<CollectionStats[]> => {
+    const invoke = (api as Partial<MongoApi>).collStatsAll
+    if (typeof invoke !== 'function') {
+      return Promise.reject(new Error('当前 preload 未包含库级集合统计接口，请重启应用后重试'))
+    }
+    return unwrap(invoke(connId, db))
   }
 }

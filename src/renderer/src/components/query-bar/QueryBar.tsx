@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import Editor from '@monaco-editor/react'
 import { KeyCode, KeyMod } from 'monaco-editor'
@@ -20,30 +20,110 @@ import { ensureMonacoConfigured } from '../../lib/monaco'
 
 ensureMonacoConfigured()
 
+/**
+ * 键入 → store 的合并延迟：连续输入只在停顿后写一次 store，
+ * 避免每个字符都触发「整棵工作区（VQB / 结果表 / 页签栏）」重渲染造成卡顿。
+ */
+const SYNC_DELAY_MS = 200
+
 /** 等宽编辑器（JSON filter / SQL，带语法高亮），编辑器实例上抛支持行/选区提取 */
 function FilterEditor({
   tab,
-  editorRef
+  editorRef,
+  flushRef,
+  runAllRef
 }: {
   tab: WorkTab
   editorRef: { current: MonacoEditor.IStandaloneCodeEditor | null }
+  flushRef: { current: (() => void) | null }
+  runAllRef: { current: (() => void) | null }
 }): JSX.Element {
-  const patchActive = useAppStore((s) => s.patchActive)
+  const patchTab = useAppStore((s) => s.patchTab)
   const isSql = tab.queryMode === 'sql'
   const isShell = tab.queryMode === 'shell'
+  const field: 'sqlText' | 'shellText' | 'filterText' = isSql
+    ? 'sqlText'
+    : isShell
+      ? 'shellText'
+      : 'filterText'
+  const text = tab[field]
+
+  /** 待提交的输入（编辑后延迟写入 store） */
+  const pending = useRef<{ tabId: string; field: typeof field; text: string } | null>(null)
+  const timer = useRef<number | null>(null)
+  /** 最近一次与 store 对齐的文本，用于区分「外部改动」与「刚写回去的内容」 */
+  const synced = useRef(text)
+  /** 正在把外部文本写入编辑器：期间产生的 onChange 不应回写 store */
+  const applying = useRef(false)
+
+  const flush = useCallback((): void => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current)
+      timer.current = null
+    }
+    const entry = pending.current
+    if (entry === null) return
+    pending.current = null
+    synced.current = entry.text
+    patchTab(entry.tabId, { [entry.field]: entry.text })
+  }, [patchTab])
+
+  // 把 flush 暴露给父级（执行查询 / 切换模式前先落库），卸载时兜底提交
+  useEffect(() => {
+    flushRef.current = flush
+    return () => {
+      flushRef.current = null
+      flush()
+    }
+  }, [flush, flushRef])
+
+  // 外部改动（VQB 导出到 filter、模式切换生成 SQL 等）写回编辑器
+  useEffect(() => {
+    if (text === synced.current) return
+    const instance = editorRef.current
+    const model = instance?.getModel() ?? null
+    if (instance === null || model === null) return
+    // 外部改动优先：丢弃尚未提交的本地输入
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current)
+      timer.current = null
+    }
+    pending.current = null
+    synced.current = text
+    if (model.getValue() !== text) {
+      applying.current = true
+      instance.setValue(text)
+      applying.current = false
+    }
+  }, [text, editorRef])
 
   const handleMount = useCallback(
     (instance: MonacoEditor.IStandaloneCodeEditor) => {
       editorRef.current = instance
-      // Ctrl+Enter → 全部执行（新查询回到第一页）
+      // Ctrl+Enter → 全部执行（新查询回到第一页）：先把编辑器内容落到 store
       instance.addCommand(KeyMod.CtrlCmd | KeyCode.Enter, () => {
+        flush()
         useAppStore
           .getState()
           .runTab(useAppStore.getState().activeTabId ?? '', { resetSkip: true })
       })
+      // F9 → 全部执行：走查询栏同一套「全部执行」逻辑（含 flush 与 SQL/Shell 分发）
+      instance.addCommand(KeyCode.F9, () => runAllRef.current?.())
+      // 失焦（点击执行 / 切换页签 / VQB 按钮）先提交，后续读取到的才是最新文本
+      instance.onDidBlurEditorText(() => flush())
     },
-    [editorRef]
+    [editorRef, flush, runAllRef]
   )
+
+  const handleChange = (value: string | undefined): void => {
+    if (applying.current) return
+    pending.current = { tabId: tab.id, field, text: value ?? '' }
+    if (timer.current !== null) window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => {
+      timer.current = null
+      flush()
+    }, SYNC_DELAY_MS)
+  }
 
   return (
     <div className="min-h-0 flex-1 overflow-hidden rounded border border-line bg-base transition-colors duration-fast focus-within:border-accent-dim">
@@ -52,16 +132,9 @@ function FilterEditor({
         height="100%"
         defaultLanguage={isSql ? 'mysql' : 'javascript'}
         theme="vs-dark"
-        value={isSql ? tab.sqlText : isShell ? tab.shellText : tab.filterText}
-        onChange={(value) =>
-          patchActive(
-            isSql
-              ? { sqlText: value ?? '' }
-              : isShell
-                ? { shellText: value ?? '' }
-                : { filterText: value ?? '' }
-          )
-        }
+        // 非受控：Monaco 自己维护文本，键入不经过 React 渲染
+        defaultValue={text}
+        onChange={handleChange}
         onMount={handleMount}
         options={{
           minimap: { enabled: false },
@@ -105,6 +178,10 @@ export function QueryBar(): JSX.Element | null {
   const runSqlText = useAppStore((s) => s.runSqlText)
   const runShellText = useAppStore((s) => s.runShellText)
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null)
+  /** 编辑器做了延迟同步：执行 / 切换模式前先 flush，保证读到最新文本 */
+  const flushRef = useRef<(() => void) | null>(null)
+  /** F9 快捷键回调（每次渲染刷新，保证拿到最新的执行闭包） */
+  const runAllRef = useRef<(() => void) | null>(null)
   const [errorCopied, setErrorCopied] = useState(false)
 
   if (activeTab === null) return null
@@ -142,6 +219,7 @@ export function QueryBar(): JSX.Element | null {
   }
 
   const runMode = (mode: RunMode): void => {
+    flushRef.current?.()
     if (!isTextMode) {
       // JSON filter：执行完整文档
       void runTab(activeTab.id, { resetSkip: true })
@@ -166,9 +244,17 @@ export function QueryBar(): JSX.Element | null {
     }
   }
 
+  // F9 绑定到与「全部执行」按钮完全相同的路径
+  runAllRef.current = () => runMode('all')
+
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col gap-1.5 bg-panel p-2">
-      <FilterEditor tab={activeTab} editorRef={editorRef} />
+      <FilterEditor
+        tab={activeTab}
+        editorRef={editorRef}
+        flushRef={flushRef}
+        runAllRef={runAllRef}
+      />
 
       {/* 执行方式：SQL 模式支持单行/选中/全部，JSON 模式执行完整 filter */}
       <div className="flex h-7 shrink-0 items-center justify-end gap-1.5">
@@ -181,7 +267,11 @@ export function QueryBar(): JSX.Element | null {
                 key={mode}
                 type="button"
                 title={title}
-                onClick={() => setQueryMode(mode)}
+                onClick={() => {
+                  // 切模式会按当前 filter 生成 SQL / Shell，先把未落库的输入提交
+                  flushRef.current?.()
+                  setQueryMode(mode)
+                }}
                 className={`h-5 cursor-pointer rounded px-2 text-[10px] transition-colors duration-fast ${
                   activeTab.queryMode === mode
                     ? 'bg-accent/20 font-medium text-accent'
@@ -255,7 +345,7 @@ export function QueryBar(): JSX.Element | null {
         )}
         <button
           type="button"
-          title="执行全部语句（Ctrl+Enter）"
+          title="执行全部语句（Ctrl+Enter / F9）"
           disabled={activeTab.running}
           onClick={() => runMode('all')}
           className="flex h-6 cursor-pointer items-center gap-1 rounded bg-accent px-2.5 text-[10px] font-semibold text-[rgb(var(--c-on-accent))] transition-colors duration-fast hover:bg-accent-bright disabled:cursor-not-allowed disabled:opacity-50"

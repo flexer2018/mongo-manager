@@ -191,17 +191,35 @@ function CollectionRow({
 function DbRow({ connId, entry, name }: { connId: string; entry: ConnEntry; name: string }): JSX.Element {
   const expanded = entry.expandedDbs.includes(name)
   const toggleDb = useAppStore((s) => s.toggleDb)
+  const openDbStats = useAppStore((s) => s.openDbStats)
   const nodes = useMemo(
     () => (entry.tree !== null ? collectionsOfLocal(entry.tree, name) : []),
     [entry.tree, name, entry.expandedDbs]
   )
   const [filter, setFilter] = useState('')
   const [modal, setModal] = useState<{ mode: 'create' | 'rename'; coll?: string } | null>(null)
+  /** 右键菜单坐标（null 表示未打开） */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
+  const [copiedAt, setCopiedAt] = useState<{ x: number; y: number } | null>(null)
   const visible = nodes.filter((node) => node.name.includes(filter))
+
+  const copyName = (x: number, y: number): void => {
+    void navigator.clipboard.writeText(name).then(() => {
+      setCopiedAt({ x, y })
+      window.setTimeout(() => setCopiedAt(null), 1000)
+    })
+  }
 
   return (
     <div>
-      <div className="group flex h-6 w-full items-center rounded transition-colors duration-fast hover:bg-hover">
+      <div
+        onContextMenu={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          setMenu({ x: event.clientX, y: event.clientY })
+        }}
+        className="group flex h-6 w-full items-center rounded transition-colors duration-fast hover:bg-hover"
+      >
         <button
           type="button"
           onClick={() => void toggleDb(connId, name)}
@@ -266,6 +284,34 @@ function DbRow({ connId, entry, name }: { connId: string; entry: ConnEntry; name
           coll={modal.coll}
           onClose={() => setModal(null)}
         />
+      )}
+      {menu !== null && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            {
+              label: '复制数据库名称',
+              icon: <Copy size={11} />,
+              onSelect: () => copyName(menu.x, menu.y)
+            },
+            {
+              label: '查看所有集合统计',
+              icon: <BarChart3 size={11} />,
+              dividerBefore: true,
+              onSelect: () => openDbStats(connId, name)
+            }
+          ]}
+        />
+      )}
+      {copiedAt !== null && (
+        <div
+          className="pointer-events-none fixed z-[110] rounded border border-line bg-elevated px-2 py-1 text-[10px] text-accent shadow-xl"
+          style={{ left: copiedAt.x, top: copiedAt.y }}
+        >
+          已复制数据库名称
+        </div>
       )}
     </div>
   )

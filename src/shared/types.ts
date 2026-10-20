@@ -105,6 +105,8 @@ export interface CollectionStats {
   capped: boolean
   /** 完整 collStats 输出（EJSON 字符串），供弹窗展示细节 */
   raw: string
+  /** 单个集合读取失败时的错误信息（库级批量统计中用于占位展示） */
+  error?: string
 }
 
 export type IpcResult<T> = { ok: true; data: T } | { ok: false; error: string }
@@ -180,6 +182,8 @@ export interface MongoApi {
 
   /** 集合统计（collStats 命令），用于树上右键「查看集合统计」 */
   collStats(connId: string, db: string, coll: string): Promise<IpcResult<CollectionStats>>
+  /** 库级批量统计：该库所有非视图集合的统计数据（树上库名右键「查看所有集合统计」） */
+  collStatsAll(connId: string, db: string): Promise<IpcResult<CollectionStats[]>>
 }
 
 export const IPC = {
@@ -210,5 +214,6 @@ export const IPC = {
   createIndex: 'idx:create',
   dropIndex: 'idx:drop',
 
-  collStats: 'coll:stats'
+  collStats: 'coll:stats',
+  collStatsAll: 'coll:statsAll'
 } as const

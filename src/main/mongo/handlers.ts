@@ -5,7 +5,7 @@
  */
 import { ipcMain } from 'electron'
 import { EJSON } from 'bson'
-import type { Document, Sort, UpdateOptions } from 'mongodb'
+import type { Db, Document, Sort, UpdateOptions } from 'mongodb'
 import {
   ConnectionManager,
   addSaved,
@@ -355,33 +355,68 @@ export function registerMongoHandlers(): void {
 
   // ---- 集合统计 ----
 
-  handle(IPC.collStats, async (connId: string, db: string, coll: string) => {
+  handle(IPC.collStats, async (connId: string, db: string, coll: string) =>
+    readCollStats(connections.client(connId).db(db), coll)
+  )
+
+  handle(IPC.collStatsAll, async (connId: string, db: string) => {
     const database = connections.client(connId).db(db)
-    // 视图等不支持 collStats 的集合回退到 $collStats 聚合
-    const stats =
-      (await database.command({ collStats: coll }).catch(async () => {
-        const [doc] = await database
-          .collection(coll)
-          .aggregate([{ $collStats: { storageStats: {} } }])
-          .toArray()
-        return { ...(doc ?? {}), ...((doc?.storageStats as Document | undefined) ?? {}) }
-      })) as Document
-    const num = (value: unknown): number => {
-      const parsed = Number(value)
-      return Number.isFinite(parsed) ? parsed : 0
+    const listed = await database
+      .listCollections({}, { nameOnly: false, authorizedCollections: true })
+      .toArray()
+    // 视图不支持 collStats，批量统计中直接跳过
+    const names = listed
+      .filter((item) => String((item as Document).type ?? 'collection') !== 'view')
+      .map((item) => String(item.name))
+    const rows: CollectionStats[] = []
+    for (const coll of names) {
+      try {
+        rows.push(await readCollStats(database, coll))
+      } catch (exc) {
+        // 单个集合无权访问/统计失败不影响整张表，保留占位行并展示错误
+        rows.push({
+          ns: `${db}.${coll}`,
+          count: 0,
+          size: 0,
+          storageSize: 0,
+          avgObjSize: 0,
+          nindexes: 0,
+          totalIndexSize: 0,
+          capped: false,
+          raw: '',
+          error: exc instanceof Error ? exc.message : String(exc)
+        })
+      }
     }
-    return {
-      ns: String(stats.ns ?? `${db}.${coll}`),
-      count: num(stats.count),
-      size: num(stats.size),
-      storageSize: num(stats.storageSize),
-      avgObjSize: num(stats.avgObjSize),
-      nindexes: num(stats.nindexes),
-      totalIndexSize: num(stats.totalIndexSize),
-      capped: Boolean(stats.capped),
-      raw: ejson(stats)
-    } satisfies CollectionStats
+    return rows
   })
+}
+
+/** 单个集合的统计摘要；视图等不支持 collStats 的集合回退到 $collStats 聚合 */
+async function readCollStats(database: Db, coll: string): Promise<CollectionStats> {
+  const stats =
+    (await database.command({ collStats: coll }).catch(async () => {
+      const [doc] = await database
+        .collection(coll)
+        .aggregate([{ $collStats: { storageStats: {} } }])
+        .toArray()
+      return { ...(doc ?? {}), ...((doc?.storageStats as Document | undefined) ?? {}) }
+    })) as Document
+  const num = (value: unknown): number => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  return {
+    ns: String(stats.ns ?? `${database.databaseName}.${coll}`),
+    count: num(stats.count),
+    size: num(stats.size),
+    storageSize: num(stats.storageSize),
+    avgObjSize: num(stats.avgObjSize),
+    nindexes: num(stats.nindexes),
+    totalIndexSize: num(stats.totalIndexSize),
+    capped: Boolean(stats.capped),
+    raw: ejson(stats)
+  }
 }
 
 export async function closeAllConnections(): Promise<void> {

@@ -296,6 +296,8 @@ export function ResultGrid(): JSX.Element {
   const activeTab = useAppStore((s) => s.tabs.find((t) => t.id === s.activeTabId) ?? null)
   const [mode, setMode] = useState<'table' | 'json' | 'indexes'>('table')
   const [drawerIndex, setDrawerIndex] = useState<number | null>(null)
+  /** 当前选中行：F4 查看详情时作为「当前记录」 */
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
   const [editor, setEditor] = useState<{ mode: 'edit' | 'insert'; doc: Value | null } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -363,11 +365,38 @@ export function ResultGrid(): JSX.Element {
     [columns]
   )
 
+  // 换一批结果后清空选中行，避免 F4 指向已不在当前页的记录
+  useEffect(() => {
+    setSelectedIndex(null)
+  }, [docs])
+
+  /** F4：查看当前记录详情（仅表格视图；输入框 / 编辑器内不拦截） */
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'F4' || mode !== 'table' || drawerIndex !== null) return
+      const target = event.target
+      if (
+        target instanceof HTMLElement &&
+        target.closest('input, textarea, select, [contenteditable="true"], .monaco-editor') !== null
+      ) {
+        return
+      }
+      if (docs.length === 0) return
+      event.preventDefault()
+      const index = selectedIndex !== null && selectedIndex < docs.length ? selectedIndex : 0
+      setSelectedIndex(index)
+      setDrawerIndex(index)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [mode, drawerIndex, selectedIndex, docs.length])
+
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-base">
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-line bg-panel px-2">
         <button
           type="button"
+          title="表格视图（F4 查看当前记录详情）"
           onClick={() => setMode('table')}
           className={`flex h-6 cursor-pointer items-center gap-1 rounded px-2 text-[10px] transition-colors duration-fast ${
             mode === 'table' ? 'bg-active text-accent' : 'text-text-muted hover:text-text-primary'
@@ -444,8 +473,13 @@ export function ResultGrid(): JSX.Element {
                   return (
                     <div
                       key={virtualRow.key}
-                      onClick={() => setDrawerIndex(virtualRow.index)}
-                      className="group absolute left-0 grid w-full cursor-pointer items-center border-b border-line/40 text-left transition-colors duration-fast hover:bg-hover"
+                      onClick={() => {
+                        setSelectedIndex(virtualRow.index)
+                        setDrawerIndex(virtualRow.index)
+                      }}
+                      className={`group absolute left-0 grid w-full cursor-pointer items-center border-b border-line/40 text-left transition-colors duration-fast hover:bg-hover ${
+                        selectedIndex === virtualRow.index ? 'bg-active' : ''
+                      }`}
                       style={{
                         height: virtualRow.size,
                         gridTemplateColumns: gridTemplate,
@@ -504,7 +538,10 @@ export function ResultGrid(): JSX.Element {
           total={docs.length}
           onNavigate={(delta) => {
             const next = drawerIndex + delta
-            if (next >= 0 && next < docs.length) setDrawerIndex(next)
+            if (next >= 0 && next < docs.length) {
+              setDrawerIndex(next)
+              setSelectedIndex(next)
+            }
           }}
           onClose={() => setDrawerIndex(null)}
           onEdit={(doc) => {

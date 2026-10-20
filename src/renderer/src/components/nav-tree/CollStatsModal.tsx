@@ -8,21 +8,13 @@ import { EJSON } from 'bson'
 import { X } from 'lucide-react'
 import type { CollectionStats } from '../../../../shared/types'
 import { backend } from '../../lib/api'
+import { fmtBytes } from '../../lib/format'
 
 interface CollStatsModalProps {
   connId: string
   db: string
   coll: string
   onClose(): void
-}
-
-/** 字节数 → 可读大小 */
-function fmtBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
-  const power = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
-  const value = bytes / 1024 ** power
-  return `${power === 0 ? value.toFixed(0) : value.toFixed(2)} ${units[power]}`
 }
 
 export function CollStatsModal({ connId, db, coll, onClose }: CollStatsModalProps): JSX.Element {

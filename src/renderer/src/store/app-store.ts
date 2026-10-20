@@ -24,6 +24,7 @@ import {
 } from '@core'
 import type { OrderedDoc, ShellCommandParts } from '@core'
 import type {
+  CollectionStats,
   CreateCollectionOptions,
   DatabaseSummary,
   IndexInfo,
@@ -34,8 +35,11 @@ import { backend } from '../lib/api'
 /** 一个集合页签的全部独立状态 */
 export interface WorkTab {
   id: string
-  /** 页签类型：collection = 绑定集合 / sql = 独立 SQL 编辑器 / shell = 独立 mongosh 编辑器 */
-  kind: 'collection' | 'sql' | 'shell'
+  /**
+   * 页签类型：collection = 绑定集合 / sql = 独立 SQL 编辑器 /
+   * shell = 独立 mongosh 编辑器 / db-stats = 库级集合统计表格
+   */
+  kind: 'collection' | 'sql' | 'shell' | 'db-stats'
   /** 页签所属连接，跨连接打开集合时互不干扰 */
   connId: string
   db: string
@@ -60,6 +64,10 @@ export interface WorkTab {
   sampling: boolean
   vqbTree: QueryGroup | null
   vqbOpen: boolean
+  /** db-stats 页签：该库所有集合的统计行 */
+  statsRows: CollectionStats[]
+  /** db-stats 页签：统计数据写入时间（0 表示尚未读取），用于展示与缓存判断 */
+  statsLoadedAt: number
 }
 
 export type ThemeName = 'dark' | 'light'
@@ -126,7 +134,9 @@ function makeTab(
     schema: null,
     sampling: false,
     vqbTree: null,
-    vqbOpen: true
+    vqbOpen: true,
+    statsRows: [],
+    statsLoadedAt: 0
   }
 }
 
@@ -196,10 +206,22 @@ interface AppState {
    * target 用于从导航树右键指定连接/库/集合；缺省取活动连接与当前页签上下文。
    */
   openQueryEditor(kind: 'sql' | 'shell', target?: { connId: string; db: string; coll: string }): void
+  /** 新增（或聚焦）库级集合统计页签：表格展示该库所有集合的统计 */
+  openDbStats(connId: string, db: string): void
+  /**
+   * 读取 db-stats 页签的统计数据：默认优先命中缓存（有效期见 DB_STATS_TTL_MS），
+   * options.force 为 true 时强制重新拉取（刷新按钮用）。
+   */
+  loadDbStats(tabId: string, options?: { force?: boolean }): Promise<void>
   setActiveTab(id: string): void
   closeTab(id: string): void
   /** 更新当前活动页签的局部状态（新建引用触发渲染） */
   patchActive(patch: Partial<WorkTab>): void
+  /**
+   * 按 id 更新指定页签：编辑器延迟同步文本时用，
+   * 避免切换页签后回写落到新的活动页签上。
+   */
+  patchTab(tabId: string, patch: Partial<WorkTab>): void
   /**
    * 执行页签查询。options.resetSkip 为 true 时先把 skip 归零——
    * 查询栏/VQB 发起新查询用，避免停留在高页码而新结果不足该页数时出现空页；
@@ -262,8 +284,62 @@ function treeFromFilterText(current: QueryGroup, text: string): QueryGroup | nul
   }
 }
 
+// ---- 库级集合统计缓存 ----
+
+/** 统计缓存有效期：有效期内反复打开同一库的统计页签不再发起全量 IPC 读取 */
+const DB_STATS_TTL_MS = 60_000
+
+/** connId + db → 统计结果；页签关闭后仍保留，避免反复右键打开时重复拉取 */
+const dbStatsCache = new Map<string, { rows: CollectionStats[]; at: number }>()
+
+/** 正在读取中的页签，避免同一页签并发重复拉取 */
+const dbStatsLoading = new Set<string>()
+
+function dbStatsKey(connId: string, db: string): string {
+  return `${connId}\u0000${db}`
+}
+
+/** 取未过期的缓存；不存在或已过期返回 null */
+function readDbStatsCache(connId: string, db: string): { rows: CollectionStats[]; at: number } | null {
+  const key = dbStatsKey(connId, db)
+  const cached = dbStatsCache.get(key)
+  if (cached === undefined) return null
+  if (Date.now() - cached.at > DB_STATS_TTL_MS) {
+    dbStatsCache.delete(key)
+    return null
+  }
+  return cached
+}
+
+/** 集合结构变化后让该库的统计缓存失效 */
+function invalidateDbStats(connId: string, db: string): void {
+  dbStatsCache.delete(dbStatsKey(connId, db))
+}
+
+/** 断开连接后清理该连接的全部统计缓存 */
+function clearConnDbStats(connId: string): void {
+  const prefix = `${connId}\u0000`
+  for (const key of [...dbStatsCache.keys()]) {
+    if (key.startsWith(prefix)) dbStatsCache.delete(key)
+  }
+}
+
+/**
+ * 应用一次页签补丁：filter 文本变化时顺带重建查询树，
+ * 让查询栏手写 / SQL 翻译 / Shell 命令回写都能反映到 VQB。
+ */
+function applyTabPatch(tab: WorkTab, patch: Partial<WorkTab>): WorkTab {
+  const next = { ...tab, ...patch }
+  if (typeof patch.filterText === 'string' && next.vqbTree !== null) {
+    const synced = treeFromFilterText(next.vqbTree, patch.filterText)
+    if (synced !== null) next.vqbTree = synced
+  }
+  return next
+}
+
 /** 集合变更后：强制重载该库的分桶缓存，并触发一次渲染 */
 async function refreshDb(connId: string, db: string): Promise<void> {
+  invalidateDbStats(connId, db)
   const store = useAppStore.getState()
   const entry = store.connections.find((item) => item.connId === connId)
   if (entry === undefined) return
@@ -486,6 +562,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const target = connId ?? get().activeConnId
     if (target === null) return
     await backend.disconnect(target).catch((exc) => console.error('断开失败:', exc))
+    clearConnDbStats(target)
     set((state) => {
       const connections = state.connections.filter((item) => item.connId !== target)
       // 关闭该连接下打开的页签，避免引用已断开的连接
@@ -613,6 +690,83 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
   },
 
+  /** 打开（或聚焦）库级集合统计页签，并读取统计数据 */
+  openDbStats: (connId, db) => {
+    const existing = get().tabs.find(
+      (tab) => tab.kind === 'db-stats' && tab.connId === connId && tab.db === db
+    )
+    if (existing !== undefined) {
+      set({ activeTabId: existing.id, activeConnId: connId })
+      void get().loadDbStats(existing.id)
+      return
+    }
+    const tab = makeTab('db-stats', connId, db, '')
+    set((state) => ({
+      tabs: [...state.tabs, tab],
+      activeTabId: tab.id,
+      activeConnId: connId
+    }))
+    void get().loadDbStats(tab.id)
+  },
+
+  /** 读取库级集合统计（running / runError 复用页签状态，供表格展示加载与错误） */
+  loadDbStats: async (tabId, options) => {
+    const tab = get().tabs.find((item) => item.id === tabId)
+    if (tab === undefined) return
+    const { connId, db } = tab
+    // 同一页签已有读取在进行中：直接复用那次结果，避免重复请求
+    if (dbStatsLoading.has(tabId)) return
+
+    if (options?.force !== true) {
+      const cached = readDbStatsCache(connId, db)
+      if (cached !== null) {
+        set((state) => ({
+          tabs: state.tabs.map((item) =>
+            item.id === tabId
+              ? {
+                  ...item,
+                  statsRows: cached.rows,
+                  statsLoadedAt: cached.at,
+                  running: false,
+                  runError: null
+                }
+              : item
+          )
+        }))
+        return
+      }
+    }
+
+    dbStatsLoading.add(tabId)
+    set((state) => ({
+      tabs: state.tabs.map((item) =>
+        item.id === tabId ? { ...item, running: true, runError: null } : item
+      )
+    }))
+    try {
+      const rows = await backend.collStatsAll(connId, db)
+      const at = Date.now()
+      dbStatsCache.set(dbStatsKey(connId, db), { rows, at })
+      set((state) => ({
+        tabs: state.tabs.map((item) =>
+          item.id === tabId
+            ? { ...item, statsRows: rows, statsLoadedAt: at, running: false }
+            : item
+        )
+      }))
+    } catch (exc) {
+      set((state) => ({
+        tabs: state.tabs.map((item) =>
+          item.id === tabId
+            ? { ...item, running: false, runError: exc instanceof Error ? exc.message : String(exc) }
+            : item
+        )
+      }))
+    } finally {
+      dbStatsLoading.delete(tabId)
+    }
+  },
+
   setActiveTab: (id) => set({ activeTabId: id }),
 
   closeTab: (id) => {
@@ -626,16 +780,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   patchActive: (patch) => {
     set((state) => ({
-      tabs: state.tabs.map((tab) => {
-        if (tab.id !== state.activeTabId) return tab
-        const next = { ...tab, ...patch }
-        // filter 文本一变就重建查询树：查询栏手写 / SQL 翻译 / Shell 命令回写都能反映到 VQB
-        if (typeof patch.filterText === 'string' && next.vqbTree !== null) {
-          const synced = treeFromFilterText(next.vqbTree, patch.filterText)
-          if (synced !== null) next.vqbTree = synced
-        }
-        return next
-      })
+      tabs: state.tabs.map((tab) =>
+        tab.id === state.activeTabId ? applyTabPatch(tab, patch) : tab
+      )
+    }))
+  },
+
+  patchTab: (tabId, patch) => {
+    set((state) => ({
+      tabs: state.tabs.map((tab) => (tab.id === tabId ? applyTabPatch(tab, patch) : tab))
     }))
   },
 
