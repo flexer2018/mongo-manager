@@ -12,6 +12,7 @@ import {
   Pencil,
   PlugZap,
   Plus,
+  RefreshCw,
   Table2,
   Terminal,
   Trash2
@@ -192,6 +193,7 @@ function DbRow({ connId, entry, name }: { connId: string; entry: ConnEntry; name
   const expanded = entry.expandedDbs.includes(name)
   const toggleDb = useAppStore((s) => s.toggleDb)
   const openDbStats = useAppStore((s) => s.openDbStats)
+  const refreshCollections = useAppStore((s) => s.refreshCollections)
   const nodes = useMemo(
     () => (entry.tree !== null ? collectionsOfLocal(entry.tree, name) : []),
     [entry.tree, name, entry.expandedDbs]
@@ -295,6 +297,12 @@ function DbRow({ connId, entry, name }: { connId: string; entry: ConnEntry; name
               label: '复制数据库名称',
               icon: <Copy size={11} />,
               onSelect: () => copyName(menu.x, menu.y)
+            },
+            {
+              label: '刷新集合列表',
+              icon: <RefreshCw size={11} />,
+              dividerBefore: true,
+              onSelect: () => void refreshCollections(connId, name)
             },
             {
               label: '查看所有集合统计',

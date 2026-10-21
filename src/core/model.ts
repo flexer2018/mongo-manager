@@ -165,12 +165,23 @@ export function insideElemMatch(group: QueryGroup): boolean {
   return !group.isRoot && (group.op === 'ELEM_MATCH' || group.op === 'NOT_ELEM_MATCH')
 }
 
+/**
+ * 给「浅拷贝出来的」节点重新绑定方法。
+ * 方法用闭包捕获节点引用：{ ...node } 继承的 isEmpty()/identityKey() 仍指向原节点，
+ * 浅拷贝后不重新绑定就会拿旧 children 判定（典型症状：新增的条件被 isEmpty 判成不存在）。
+ */
+export function rebindNode<T extends QueryNode>(node: T): T {
+  return (
+    node.kind === 'rule'
+      ? wireRule(node as unknown as FieldRule)
+      : wireGroup(node as unknown as QueryGroup)
+  ) as unknown as T
+}
+
 /** 深拷贝（对应 UI"复制行/复制组"）；BSON 值经 EJSON 往返保真，方法重新绑定 */
 export function duplicateNode<T extends QueryNode>(node: T): T {
   const clone = EJSON.parse(EJSON.stringify(node, { relaxed: false })) as unknown as T
-  return node.kind === 'rule'
-    ? (wireRule(clone as unknown as FieldRule) as unknown as T)
-    : (wireGroup(clone as unknown as QueryGroup) as unknown as T)
+  return rebindNode(clone)
 }
 
 export interface WalkEntry {

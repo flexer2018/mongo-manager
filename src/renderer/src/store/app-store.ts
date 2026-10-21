@@ -17,12 +17,13 @@ import {
   parseFindFilter,
   parseShellCommand,
   parseShellLiteral,
+  rebindNode,
   toBson,
   toShellLiteral,
   QueryGroup,
   sqlToMongo
 } from '@core'
-import type { OrderedDoc, ShellCommandParts } from '@core'
+import type { FieldRule, OrderedDoc, QueryNode, ShellCommandParts } from '@core'
 import type {
   CollectionStats,
   CreateCollectionOptions,
@@ -31,6 +32,7 @@ import type {
   SavedConnection
 } from '../../../shared/types'
 import { backend } from '../lib/api'
+import { describeTree, logAction, oneLine } from '../lib/action-log'
 
 /** 一个集合页签的全部独立状态 */
 export interface WorkTab {
@@ -196,6 +198,8 @@ interface AppState {
   collectionError: string | null
   loadDatabases(connId: string): Promise<void>
   toggleDb(connId: string, db: string): Promise<void>
+  /** 重新拉取库的集合列表（外部新建 / 删除集合后无需断开连接） */
+  refreshCollections(connId: string, db: string): Promise<void>
 
   // ---- 集合页签（多开） ----
   tabs: WorkTab[]
@@ -261,10 +265,60 @@ interface AppState {
   exportVqbToFilter(): void
 }
 
+/** 树里是否至少有一条真正填了字段的条件（占位空行为 false） */
+function hasRealRule(nodes: QueryNode[]): boolean {
+  return nodes.some((node) =>
+    node.kind === 'rule'
+      ? (node as FieldRule).field.trim() !== ''
+      : hasRealRule((node as QueryGroup).children)
+  )
+}
+
+/**
+ * 列出「填了字段却不参与编译」的条件：include 非真或字段为空。
+ * 编译层只按 include 过滤（compiler.activeNodes），日志层按同一标准对照排查。
+ */
+function describeSkipped(nodes: QueryNode[]): string[] {
+  const skipped: string[] = []
+  for (const node of nodes) {
+    if (node.kind === 'rule') {
+      const rule = node as FieldRule
+      if (rule.include !== true || rule.field.trim() === '') {
+        skipped.push(`${rule.field || '<空字段>'}:${rule.operator} include=${String(rule.include)}`)
+      }
+      continue
+    }
+    skipped.push(...describeSkipped((node as QueryGroup).children))
+  }
+  return skipped
+}
+
 /** VQB 树编辑后写入页签：浅拷贝根组保证 Zustand 引用变化 */
 function commitTree(tab: WorkTab, tree: QueryGroup): Partial<WorkTab> {
-  const clone: QueryGroup = { ...tree, children: [...tree.children] }
-  return { vqbTree: clone, filterText: dumps(toBson(clone), 0) }
+  // 必须重新绑定方法：{ ...tree } 继承的 isEmpty() 闭包仍指向旧树，
+  // 用它判空会漏掉后来新增的规则（导致整片条件被编译成 {}）
+  const clone: QueryGroup = rebindNode({ ...tree, children: [...tree.children] })
+  // 树里只有占位空行（字段还没填）时不覆盖 filter：
+  // 否则 VQB 尚未从 filter 反解析出条件时，点一下勾选框就把编辑器里的查询清成 {}
+  if (clone.children.length > 0 && !hasRealRule(clone.children)) {
+    logAction('store', '树 → filter：只有占位空行，保留原 filter', {
+      tree: describeTree(clone.children)
+    })
+    return { vqbTree: clone }
+  }
+  const text = dumps(toBson(clone), 0)
+  // 填了字段却编译成空文档：条件在编译期被判为「不参与」（include 非真 / 字段空白），
+  // 单独记一条错误，避免条件静默消失后只能靠猜
+  if (text === '{}') {
+    logAction('error', '树 → filter：有真实条件却编译成空文档（条件被判为不参与编译）', {
+      tree: describeTree(clone.children),
+      skipped: describeSkipped(clone.children)
+    })
+  }
+  logAction('store', `树 → filter：${oneLine(text)}`, {
+    tree: describeTree(clone.children)
+  })
+  return { vqbTree: clone, filterText: text }
 }
 
 /**
@@ -273,15 +327,28 @@ function commitTree(tab: WorkTab, tree: QueryGroup): Partial<WorkTab> {
  * （例如树编辑后回写 filter 触发的等价文本，避免打断正在编辑的 VQB 行）。
  */
 function treeFromFilterText(current: QueryGroup, text: string): QueryGroup | null {
+  let tree: QueryGroup
   try {
-    const tree = parseFindFilter(text.trim() === '' ? '{}' : text)
-    const sameDoc =
-      EJSON.stringify(toBson(tree), { relaxed: false }) ===
-      EJSON.stringify(toBson(current), { relaxed: false })
-    return sameDoc ? null : tree
-  } catch {
+    tree = parseFindFilter(text.trim() === '' ? '{}' : text)
+  } catch (exc) {
+    logAction('store', `filter → 树：解析失败，保留原树（${oneLine(text, 120)}）`, {
+      error: exc instanceof Error ? exc.message : String(exc)
+    })
     return null
   }
+  const sameDoc =
+    EJSON.stringify(toBson(tree), { relaxed: false }) ===
+    EJSON.stringify(toBson(current), { relaxed: false })
+  if (sameDoc) {
+    logAction('store', 'filter → 树：与当前树等价，保留原树', {
+      tree: describeTree(current.children)
+    })
+    return null
+  }
+  logAction('store', `filter → 树：按文本重建（${oneLine(text, 120)}）`, {
+    tree: describeTree(tree.children)
+  })
+  return tree
 }
 
 // ---- 库级集合统计缓存 ----
@@ -329,6 +396,17 @@ function clearConnDbStats(connId: string): void {
  * 让查询栏手写 / SQL 翻译 / Shell 命令回写都能反映到 VQB。
  */
 function applyTabPatch(tab: WorkTab, patch: Partial<WorkTab>): WorkTab {
+  const keys = Object.keys(patch)
+  const patchTree = patch.vqbTree
+  logAction('store', `patchActive(${tab.id}) ${keys.join(',')}`, {
+    filterText: typeof patch.filterText === 'string' ? oneLine(patch.filterText, 160) : undefined,
+    vqbTree:
+      patchTree === undefined
+        ? undefined
+        : patchTree === null
+          ? '无树'
+          : describeTree(patchTree.children)
+  })
   const next = { ...tab, ...patch }
   if (typeof patch.filterText === 'string' && next.vqbTree !== null) {
     const synced = treeFromFilterText(next.vqbTree, patch.filterText)
@@ -343,7 +421,7 @@ async function refreshDb(connId: string, db: string): Promise<void> {
   const store = useAppStore.getState()
   const entry = store.connections.find((item) => item.connId === connId)
   if (entry === undefined) return
-  await entry.tree.load(db, true).catch((exc) => console.error('刷新集合失败:', exc))
+  await entry.tree.load(db, true)
   useAppStore.setState((state) => ({
     connections: state.connections.map((item) =>
       item.connId === connId ? { ...item, expandedDbs: [...item.expandedDbs] } : item
@@ -365,6 +443,11 @@ async function executeFind(tabId: string): Promise<void> {
     // shell 语法（键可无引号）→ 规范 EJSON，类型保真（Int32/Long/ObjectId…），
     // 主进程只做 EJSON.parse，不接触 shell 文本
     const filterEjson = toEjsonText(tab.filterText || '{}')
+    logAction('store', `执行 find ${tab.db}.${tab.coll}`, {
+      filter: oneLine(tab.filterText, 240),
+      skip: tab.skip,
+      limit: tab.limit
+    })
     const result = await backend.find({
       connId,
       db: tab.db,
@@ -376,6 +459,7 @@ async function executeFind(tabId: string): Promise<void> {
       limit: tab.limit
     })
     const docs = result.docs.map((text) => EJSON.parse(text, { relaxed: false }) as Value)
+    logAction('store', `find 返回 ${result.count} 条（${result.elapsedMs}ms）`)
     useAppStore.setState((state) => ({
       tabs: state.tabs.map((item) =>
         item.id === tabId
@@ -392,11 +476,11 @@ async function executeFind(tabId: string): Promise<void> {
       )
       .catch((exc) => console.error('count 失败:', exc))
   } catch (exc) {
+    const message = exc instanceof Error ? exc.message : String(exc)
+    logAction('error', `find 失败：${oneLine(message)}`)
     useAppStore.setState((state) => ({
       tabs: state.tabs.map((item) =>
-        item.id === tabId
-          ? { ...item, running: false, runError: exc instanceof Error ? exc.message : String(exc) }
-          : item
+        item.id === tabId ? { ...item, running: false, runError: message } : item
       )
     }))
   }
@@ -645,6 +729,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  /** 强制重新拉取集合列表：先展开该库，刷新结果立即可见 */
+  refreshCollections: async (connId, db) => {
+    const entry = get().connections.find((item) => item.connId === connId)
+    if (entry === undefined) return
+    if (!entry.expandedDbs.includes(db)) {
+      set((state) => ({
+        connections: state.connections.map((item) =>
+          item.connId === connId ? { ...item, expandedDbs: [...item.expandedDbs, db] } : item
+        )
+      }))
+    }
+    set({ collectionError: null })
+    try {
+      await refreshDb(connId, db)
+    } catch (exc) {
+      set({ collectionError: exc instanceof Error ? exc.message : String(exc) })
+    }
+  },
+
   tabs: [],
   activeTabId: null,
 
@@ -654,10 +757,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       (tab) => tab.kind === 'collection' && tab.connId === connId && tab.db === db && tab.coll === coll
     )
     if (existing !== undefined) {
+      logAction('store', `切到已打开的集合页签 ${db}.${coll}（${existing.id}）`)
       set({ activeTabId: existing.id })
       return
     }
     const tab = makeTab('collection', connId, db, coll)
+    logAction('store', `打开集合页签 ${db}.${coll}（${tab.id}）`)
     set((state) => ({ tabs: [...state.tabs, tab], activeTabId: tab.id }))
     void get().runTab(tab.id)
     void get().sampleForTab(tab.id)
@@ -770,6 +875,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setActiveTab: (id) => set({ activeTabId: id }),
 
   closeTab: (id) => {
+    logAction('store', `关闭页签 ${id}`)
     set((state) => {
       const tabs = state.tabs.filter((tab) => tab.id !== id)
       const activeTabId =
@@ -831,12 +937,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (tabId === null) return
     const tab = get().tabs.find((item) => item.id === tabId)
     if (tab === undefined) return
+    logAction('store', `执行 Shell 命令（${oneLine(text, 200)}）`)
     let parts: ShellCommandParts
     try {
       parts = parseShellCommand(text)
     } catch (exc) {
+      const message = exc instanceof Error ? exc.message : String(exc)
+      logAction('error', `Shell 命令解析失败：${oneLine(message)}`)
       get().patchActive({
-        runError: `命令解析失败: ${exc instanceof Error ? exc.message : String(exc)}`
+        runError: `命令解析失败: ${message}`
       })
       return
     }
@@ -1094,6 +1203,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setQueryMode: (mode) => {
     const tab = get().tabs.find((item) => item.id === get().activeTabId)
     if (tab === undefined || tab.queryMode === mode) return
+    logAction('store', `查询模式 ${tab.queryMode} → ${mode}`)
     if (mode === 'sql' && tab.sqlText.trim() === '') {
       // 首次切到 SQL：用当前 filter 生成等价 SELECT（不可表达则留提示）
       let doc: OrderedDoc = {}
@@ -1136,12 +1246,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   setVqbTree: (tree) => {
     const tab = get().tabs.find((item) => item.id === get().activeTabId)
     if (tab === undefined) return
+    logAction('store', 'setVqbTree（VQB 编辑提交）', { tree: describeTree(tree.children) })
     get().patchActive(commitTree(tab, tree))
   },
 
   toggleVqb: () => {
     const tab = get().tabs.find((item) => item.id === get().activeTabId)
     if (tab === undefined) return
+    logAction('store', `VQB 面板 ${tab.vqbOpen ? '收起' : '展开'}`)
     get().patchActive({ vqbOpen: !tab.vqbOpen })
   },
 
@@ -1150,9 +1262,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (tab === undefined) return false
     try {
       const tree = parseFindFilter(tab.filterText || '{}')
+      logAction('store', '点击「从 filter 导入」：解析成功', { tree: describeTree(tree.children) })
       get().patchActive({ vqbTree: tree, vqbOpen: true })
       return true
-    } catch {
+    } catch (exc) {
+      logAction('store', '点击「从 filter 导入」：解析失败', {
+        filterText: oneLine(tab.filterText, 200),
+        error: exc instanceof Error ? exc.message : String(exc)
+      })
       return false
     }
   },
@@ -1160,6 +1277,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   exportVqbToFilter: () => {
     const tab = get().tabs.find((item) => item.id === get().activeTabId)
     if (tab === undefined || tab.vqbTree === null) return
+    logAction('store', '点击「导出到 filter」')
     get().patchActive(commitTree(tab, tab.vqbTree))
   }
 }))

@@ -35,6 +35,7 @@ import {
   isPlainObject
 } from '@core'
 import { useAppStore } from '../../store/app-store'
+import { describeTree, logAction, oneLine } from '../../lib/action-log'
 import { ConfirmDialog } from '../ConfirmDialog'
 
 const GROUP_OPS: GroupOp[] = ['AND', 'OR', 'NOR']
@@ -63,6 +64,24 @@ function operatorChoices(fieldType: string | null): Operator[] {
 
 /** 字段下拉渲染上限：schema 字段可能上千，原生 select 全量渲染会卡死 */
 const FIELD_LIST_MAX = 200
+
+/**
+ * 节点稳定 key：按对象身份分配，不用 identityKey()。
+ * 字段名是 identityKey 的一部分，拿它当 React key 会让「改字段名」= 换 key = 整行重建，
+ * 输入框随之失焦（手动输入只能一个字符一次）。
+ */
+const nodeKeys = new WeakMap<QueryNode, number>()
+let nextNodeKey = 0
+
+function keyOfNode(node: QueryNode): number {
+  let key = nodeKeys.get(node)
+  if (key === undefined) {
+    nextNodeKey += 1
+    key = nextNodeKey
+    nodeKeys.set(node, key)
+  }
+  return key
+}
 
 /** 分段参数输入：skip/limit 数字框；proj/sort 支持从结果表格拖入字段名 */
 function SegmentInput({
@@ -305,18 +324,39 @@ function FieldCombo({
     setOpen(false)
   }
 
+  /** 输入框里的草稿：只在失焦 / 回车时提交（提交会重编译整棵树并重渲染整个工作区） */
+  const commitDraft = (): void => {
+    if (query === null) return
+    commit(query)
+  }
+
+  /** 输入框当前显示的字段名（草稿优先，用于「自定义」项与高亮判断） */
+  const typed = query ?? value
+
   return (
     <div className="relative min-w-0 flex-1">
       <input
         ref={inputRef}
-        value={query ?? value}
+        value={typed}
         onChange={(event) => {
+          // 只更新本地草稿与下拉过滤：逐字符写 store 会触发「编译整棵树 + 全量重渲染」
           setQuery(event.target.value)
-          onChange(event.target.value)
           openWithRect()
         }}
         onFocus={openWithRect}
-        onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        onBlur={() => {
+          commitDraft()
+          window.setTimeout(() => setOpen(false), 150)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commitDraft()
+          } else if (event.key === 'Escape') {
+            setQuery(null)
+            setOpen(false)
+          }
+        }}
         onDragOver={(event) => {
           if (!event.dataTransfer.types.includes(VQB_FIELD_MIME)) return
           event.preventDefault()
@@ -352,14 +392,14 @@ function FieldCombo({
             className="fixed z-[100] max-h-56 overflow-y-auto rounded border border-line bg-elevated shadow-xl"
             style={{ top: rect.top, left: rect.left, width: Math.max(rect.width, 220) }}
           >
-            {value !== '' && !list.includes(value) && (
+            {typed !== '' && !list.includes(typed) && (
               <button
                 type="button"
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={() => commit(value)}
+                onClick={() => commit(typed)}
                 className="flex h-6 w-full items-center px-2 text-left text-[11px] text-warning hover:bg-hover"
               >
-                {value}（自定义）
+                {typed}（自定义）
               </button>
             )}
             {list.map((name) => (
@@ -369,7 +409,7 @@ function FieldCombo({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => commit(name)}
                 className={`mono flex h-6 w-full items-center truncate px-2 text-left text-[11px] transition-colors duration-fast ${
-                  name === value
+                  name === typed
                     ? 'bg-active text-accent'
                     : 'text-text-secondary hover:bg-hover hover:text-text-primary'
                 }`}
@@ -377,7 +417,7 @@ function FieldCombo({
                 {name}
               </button>
             ))}
-            {list.length === 0 && value !== '' && (
+            {list.length === 0 && typed !== '' && (
               <div className="px-2 py-1 text-[10px] text-text-faint">按 Enter 使用自定义字段</div>
             )}
             {hidden > 0 && (
@@ -395,26 +435,31 @@ function FieldCombo({
 function RuleRow({
   rule,
   parent,
+  root,
   schemaNames
 }: {
   rule: FieldRule
   parent: QueryGroup
+  /** 当前面板渲染的根组：提交时用它编译，保证「看到什么就写什么」 */
+  root: QueryGroup
   schemaNames: string[]
 }): JSX.Element {
   const setVqbTree = useAppStore((s) => s.setVqbTree)
 
+  // 注意：不能用 store 里的 vqbTree——它可能已被编辑器文本同步替换过，
+  // 与用户眼前这棵（被原地修改的）树不一致，会把条件整片覆盖掉
   const commit = (): void => {
-    const state = useAppStore.getState()
-    const tree = state.tabs.find((t) => t.id === state.activeTabId)?.vqbTree ?? null
-    if (tree !== null) setVqbTree(tree)
+    setVqbTree(root)
   }
 
   const update = (patch: Partial<FieldRule>): void => {
+    logAction('vqb', `规则「${rule.field || '<空字段>'}」更新 ${Object.keys(patch).join(',')}`, patch)
     Object.assign(rule, patch)
     commit()
   }
 
   const remove = (): void => {
+    logAction('vqb', `删除规则「${rule.field || '<空字段>'}」`)
     const index = parent.children.indexOf(rule)
     if (index >= 0) parent.children.splice(index, 1)
     commit()
@@ -422,6 +467,7 @@ function RuleRow({
 
   const index = parent.children.indexOf(rule)
   const move = (delta: -1 | 1): void => {
+    logAction('vqb', `规则「${rule.field || '<空字段>'}」${delta < 0 ? '上移' : '下移'}`)
     moveChild(parent, index, index + delta)
     commit()
   }
@@ -669,11 +715,14 @@ function textToValue(text: string, fieldType: string | null = null): Value {
 function GroupBlock({
   group,
   parent,
+  root,
   depth,
   schemaNames
 }: {
   group: QueryGroup
   parent: QueryGroup | null
+  /** 面板渲染的根组（提交时用它编译，见 RuleRow.commit 的说明） */
+  root: QueryGroup
   depth: number
   schemaNames: string[]
 }): JSX.Element {
@@ -683,12 +732,14 @@ function GroupBlock({
   const [dropIndex, setDropIndex] = useState<number | null>(null)
 
   const mutate = (): void => {
-    const state = useAppStore.getState()
-    const tree = state.tabs.find((t) => t.id === state.activeTabId)?.vqbTree ?? null
-    if (tree !== null) setVqbTree(tree)
+    logAction('vqb', `组编辑提交（${group.op}${group.field ? ` ${group.field}` : ''}）`, {
+      tree: describeTree(root.children)
+    })
+    setVqbTree(root)
   }
 
   const addRule = (): void => {
+    logAction('vqb', `新增条件行（组 ${group.op}）`)
     const field = isElemMatch ? ARRAY_ELEMENT_PLACEHOLDER : ''
     const rule = createFieldRule({ field, operator: 'EQUALS', value: null })
     group.children.push(rule)
@@ -696,6 +747,7 @@ function GroupBlock({
   }
 
   const addGroup = (): void => {
+    logAction('vqb', `新增条件组（组 ${group.op}）`)
     const child = createQueryGroup({ op: 'AND' })
     child.children = [createFieldRule({ field: isElemMatch ? ARRAY_ELEMENT_PLACEHOLDER : '' })]
     group.children.push(child)
@@ -704,6 +756,7 @@ function GroupBlock({
 
   const remove = (): void => {
     if (parent === null) return
+    logAction('vqb', `删除条件组（${group.op}${group.field ? ` ${group.field}` : ''}）`)
     const index = parent.children.indexOf(group)
     if (index >= 0) parent.children.splice(index, 1)
     mutate()
@@ -712,6 +765,7 @@ function GroupBlock({
   const index = parent !== null ? parent.children.indexOf(group) : -1
   const move = (delta: -1 | 1): void => {
     if (parent === null) return
+    logAction('vqb', `条件组「${group.op}」${delta < 0 ? '上移' : '下移'}`)
     moveChild(parent, index, index + delta)
     mutate()
   }
@@ -802,7 +856,7 @@ function GroupBlock({
       <div className="px-1.5 pb-1.5">
         {group.children.map((child, index) => (
           <div
-            key={child.identityKey()}
+            key={keyOfNode(child)}
             onDragOver={(event) => {
               if (dragCtx === null || dragCtx.parent !== group) return
               event.preventDefault()
@@ -830,12 +884,14 @@ function GroupBlock({
               <RuleRow
                 rule={child as unknown as FieldRule}
                 parent={group}
+                root={root}
                 schemaNames={schemaNames}
               />
             ) : (
               <GroupBlock
                 group={child as unknown as QueryGroup}
                 parent={group}
+                root={root}
                 depth={depth + 1}
                 schemaNames={schemaNames}
               />
@@ -953,7 +1009,12 @@ export function VqbPanel(): JSX.Element | null {
     if (activeTab !== null) {
       try {
         root = parseFindFilter(activeTab.filterText || '{}')
-      } catch {
+      } catch (exc) {
+        // 不能静默吞：解析失败会退化成空树，条件看起来「消失」了
+        logAction('error', 'VQB 首次打开：filter 反解析失败，回退为空树', {
+          filterText: oneLine(activeTab.filterText ?? '', 200),
+          error: exc instanceof Error ? exc.message : String(exc)
+        })
         root = null
       }
     }
@@ -963,6 +1024,10 @@ export function VqbPanel(): JSX.Element | null {
     } else if (root.children.length === 0) {
       root.children = [createFieldRule({ field: '' })]
     }
+    logAction('vqb', 'VQB 首次打开：初始化查询树', {
+      tree: describeTree(root.children),
+      filterText: oneLine(activeTab?.filterText ?? '', 160)
+    })
     // 只写树不写 filter：保留用户在查询栏里的原始书写（导出时才会规范化）
     patchActive({ vqbTree: root })
   }, [vqbOpen, vqbTree, patchActive, activeTab])
@@ -998,7 +1063,13 @@ export function VqbPanel(): JSX.Element | null {
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2 pt-1">
-        <GroupBlock group={tree} parent={null} depth={0} schemaNames={schemaNames} />
+        <GroupBlock
+          group={tree}
+          parent={null}
+          root={tree}
+          depth={0}
+          schemaNames={schemaNames}
+        />
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-line px-2 py-1.5">
         <PartEditor

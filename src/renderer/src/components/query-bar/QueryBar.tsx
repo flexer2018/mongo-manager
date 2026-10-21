@@ -17,6 +17,7 @@ import {
 import type { WorkTab } from '../../store/app-store'
 import { useAppStore } from '../../store/app-store'
 import { ensureMonacoConfigured } from '../../lib/monaco'
+import { logAction, oneLine } from '../../lib/action-log'
 
 ensureMonacoConfigured()
 
@@ -65,6 +66,7 @@ function FilterEditor({
     if (entry === null) return
     pending.current = null
     synced.current = entry.text
+    logAction('editor', `输入落库 ${entry.field}（${entry.tabId}）`, oneLine(entry.text, 200))
     patchTab(entry.tabId, { [entry.field]: entry.text })
   }, [patchTab])
 
@@ -91,11 +93,12 @@ function FilterEditor({
     pending.current = null
     synced.current = text
     if (model.getValue() !== text) {
+      logAction('editor', `外部改动写回编辑器（${field}）`, oneLine(text, 200))
       applying.current = true
       instance.setValue(text)
       applying.current = false
     }
-  }, [text, editorRef])
+  }, [text, editorRef, field])
 
   const handleMount = useCallback(
     (instance: MonacoEditor.IStandaloneCodeEditor) => {
@@ -220,6 +223,10 @@ export function QueryBar(): JSX.Element | null {
 
   const runMode = (mode: RunMode): void => {
     flushRef.current?.()
+    logAction(
+      'editor',
+      `执行查询（${mode === 'all' ? '全部' : mode === 'line' ? '单行' : '选中'}）· 模式 ${activeTab.queryMode}`
+    )
     if (!isTextMode) {
       // JSON filter：执行完整文档
       void runTab(activeTab.id, { resetSkip: true })

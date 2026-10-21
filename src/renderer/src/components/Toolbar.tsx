@@ -8,11 +8,13 @@ import {
   Moon,
   Plug,
   PlugZap,
+  ScrollText,
   Settings,
   Sun,
   Terminal
 } from 'lucide-react'
 import { useAppStore } from '../store/app-store'
+import { toggleLogVisible, useLogVisible } from '../lib/action-log'
 import { ConnectDialog } from './ConnectDialog'
 
 /** 顶部工具条：应用标识 + 连接状态灯 + 连接管理入口 + 主题切换 */
@@ -28,6 +30,7 @@ export function Toolbar(): JSX.Element {
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const logVisible = useLogVisible()
 
   const connected = connections.length > 0
 
@@ -142,6 +145,16 @@ export function Toolbar(): JSX.Element {
         Shell 查询
       </button>
 <div className="flex-1" />
+      <button
+        type="button"
+        onClick={toggleLogVisible}
+        title="操作日志（Ctrl+Shift+L）"
+        className={`flex size-7 cursor-pointer items-center justify-center rounded border bg-elevated transition-colors duration-fast hover:border-line-strong hover:text-text-primary ${
+          logVisible ? 'border-accent-dim text-accent' : 'border-line text-text-secondary'
+        }`}
+      >
+        <ScrollText size={13} />
+      </button>
       <button
         type="button"
         onClick={toggleTheme}

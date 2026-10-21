@@ -7,7 +7,8 @@ import {
   ARRAY_ELEMENT_PLACEHOLDER,
   FieldRule,
   QueryGroup,
-  QueryNode
+  QueryNode,
+  groupIsEmpty
 } from './model'
 import { GroupOp, Operator, groupMongoKey, isRangeOperator, mongoOps, valueIsList } from './operators'
 import { dumps, escapeRegex, parseShellLiteral } from './values'
@@ -201,7 +202,8 @@ export function compileGroup(
   options?: CompileOptions & { insideElemMatch?: boolean }
 ): OrderedDoc | null {
   const opts = resolveOpts(options)
-  if (!group.include || group.isEmpty()) {
+  // 直接用传入的组判定（不经 group.isEmpty()）：浅拷贝出来的组，其方法闭包可能指向旧对象
+  if (!group.include || groupIsEmpty(group)) {
     return group.isRoot ? {} : null
   }
 
